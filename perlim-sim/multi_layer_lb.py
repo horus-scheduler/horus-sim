@@ -4,7 +4,7 @@ import math
 import random 
 from multiprocessing import Process, Queue, Value, Array
 
-result_dir = "./results_layered_1/"
+result_dir = "./results_layered_2/"
 
 # 100 Machines
 # num_pods = 2
@@ -16,7 +16,6 @@ num_pods = 2
 spines_per_pod = 5
 tors_per_pod = 10
 workers_per_tor = 5
-
 
 num_tors = num_pods * tors_per_pod
 num_spines = spines_per_pod * num_pods
@@ -75,8 +74,27 @@ def get_tor_partition_range_for_spine(spine_idx): #Used for partitioned pow-of-k
     tor_start_idx = spine_idx * partition_size
     return range(tor_start_idx, tor_start_idx + partition_size)
 
+def calculate_tor_queue_len(tor_idx, queue_lens_workers):
+    worker_range = get_worker_range_for_tor(tor_idx)
+    sum_queue_len = 0
+    for worker_idx in worker_range:
+        sum_queue_len += queue_lens_workers[worker_idx]
+    return float(sum_queue_len) / workers_per_tor
+
 def write_to_file_wait_time(policy, load, distribution, results, num_spines = 1):
     metric = 'wait_times'
+
+    filename = policy + '_' + distribution + '_' + 'n' + str(num_workers) + '_m' + str(num_spines) + '_' + metric +  '_' + str(load) + '.csv'
+    
+    with open(result_dir + filename, 'wb') as output_file:
+        for i, value in enumerate(results):
+            if i < len(results) - 1:
+                output_file.write(str(value) + ', ')
+            else:
+                output_file.write(str(value))
+
+def write_to_file_decision_type(policy, load, distribution, results, num_spines = 1):
+    metric = 'decision_type'
 
     filename = policy + '_' + distribution + '_' + 'n' + str(num_workers) + '_m' + str(num_spines) + '_' + metric +  '_' + str(load) + '.csv'
     
@@ -168,7 +186,11 @@ def process_tasks_fcfs(inter_arrival, task_lists, queue_lens_workers, queue_lens
                 task_lists[i].pop(0)        # Remove from list
                 queue_lens_workers[i] -= 1       # Decrement worker queue len
                 tor_idx = get_tor_idx_for_worker(i)
-                queue_lens_tors[tor_idx] -= 1.0 / workers_per_tor
+                queue_lens_tors[tor_idx] = calculate_tor_queue_len(tor_idx, queue_lens_workers)
+
+                # if queue_lens_tors[tor_idx] < 0:
+                #     print ("ERROR")
+                #     print("Tor: " + str(tor_idx) + "worker: " + str(i))
                 if idle_queue_spine is None: # Random and JIQ do not use this part
                     if (num_msg is not None): 
                         num_msg += msg_per_done # Update queue len for higher level scheduers
@@ -272,10 +294,10 @@ def pow_of_k(k, num_spines, distribution, distribution_name, inter_arrival, sys_
         task_wait_time[target_worker].append(np.sum(task_lists[target_worker])) # Task assigned to target worker should wait at least as long as pending load
         queue_len_signal_workers[target_worker].append(queue_lens_workers[target_worker])
         queue_lens_workers[target_worker] += 1
-        queue_lens_tors[target_tor] += 1.0 / workers_per_tor # Assuming tors report average queue length of workers
+        queue_lens_tors[target_tor] = calculate_tor_queue_len(target_tor, queue_lens_workers) # Assuming tors report average queue length of workers
         num_msg += num_spines # Update queue len for other spines
         task_lists[target_worker].append(load)
-        
+        #print queue_lens_tors
     idle_avg /= len(distribution)
     flat_task_wait_time = [item for sublist in task_wait_time for item in sublist]
     flat_queue_len_signal = [item for sublist in queue_len_signal_workers for item in sublist]
@@ -343,10 +365,10 @@ def pow_of_k_partitioned(k, num_spines, distribution, distribution_name, inter_a
                 target_worker = idx
 
         
-        queue_lens_tors[target_tor] += 1.0 / workers_per_tor # Assuming tors report average queue length of workers
         task_wait_time[target_worker].append(np.sum(task_lists[target_worker])) # Task assigned to target worker should wait at least as long as pending load
         queue_len_signal_workers[target_worker].append(queue_lens_workers[target_worker])
         queue_lens_workers[target_worker] += 1
+        queue_lens_tors[target_tor] = calculate_tor_queue_len(target_tor, queue_lens_workers) # Assuming tors report average queue length of workers
         task_lists[target_worker].append(load)
 
     idle_avg /= len(distribution)
@@ -446,8 +468,9 @@ def jiq(k, num_spines, distribution, distribution_name, inter_arrival, sys_load)
         task_wait_time[target_worker].append(np.sum(task_lists[target_worker])) # Task assigned to target worker should wait at least as long as pending load
         queue_len_signal[target_worker].append(queue_lens_workers[target_worker])
         queue_lens_workers[target_worker] += 1
+        queue_lens_tors[target_tor] = calculate_tor_queue_len(target_tor, queue_lens_workers) # queue_lens_tors not used by algorithm
         task_lists[target_worker].append(load)
-
+        #print queue_lens_tors
     #task_wait_time = np.array(task_wait_time).flatten()
     idle_avg /= len(distribution)
 
@@ -478,9 +501,12 @@ def adaptive(k, num_spines, distribution, distribution_name, inter_arrival, sys_
     known_queue_len_spine = [] * num_spines  # For each spine, list of maps between torID and average queueLen if ToR
     known_queue_len_tor = [] * num_tors # For each tor, list of maps between workerID and queueLen
     
-    queue_len_signal = [] * num_workers # For analysis only 
+    queue_len_signal = [] * num_tors # For analysis only 
 
     partition_size_spine = num_tors / num_spines
+    
+    decision_type = [] * num_workers
+    decision_tag = 0
 
     num_msg = 0
     idle_avg = 0
@@ -489,7 +515,7 @@ def adaptive(k, num_spines, distribution, distribution_name, inter_arrival, sys_
     for i in range(num_workers):
         task_lists.append([])
         task_wait_time.append([])
-        queue_len_signal.append([])
+        decision_type.append([])
 
     for spine_idx in range(num_spines):
         idle_queue_spine.append(get_tor_partition_range_for_spine(spine_idx))
@@ -498,6 +524,7 @@ def adaptive(k, num_spines, distribution, distribution_name, inter_arrival, sys_
     for tor_idx in range(num_tors):
         idle_queue_tor.append(get_worker_range_for_tor(tor_idx))
         known_queue_len_tor.append({})
+        queue_len_signal.append([])
 
     for load in distribution:   # New task arrive
         # For analsis only:
@@ -529,7 +556,7 @@ def adaptive(k, num_spines, distribution, distribution_name, inter_arrival, sys_
         
         if len(idle_queue_spine[target_spine]) > 0:  # Spine is aware of some tors with idle servers
             target_tor = idle_queue_spine[target_spine].pop(0)
-            
+            decision_tag = 0
         else:   # No tor with idle server is known
             already_paired = False
             sq_update = False
@@ -544,7 +571,6 @@ def adaptive(k, num_spines, distribution, distribution_name, inter_arrival, sys_
 
                     if not already_paired: # Each tor queue len should be available at one spine only
                         sq_update = True
-                        
 
             if (len(known_queue_len_spine[target_spine]) > k): # Do shortest queue if enough info available    
                 sample_tors = random.sample(list(known_queue_len_spine[target_spine]), k) # k samples from ToR queue lenghts available to that spine
@@ -554,6 +580,7 @@ def adaptive(k, num_spines, distribution, distribution_name, inter_arrival, sys_
                     if sample_queue_len < min_load:
                         min_load = sample_queue_len
                         target_tor = tor_idx
+                decision_tag = 1 # SQ-based decision
             else: # Randomly select a ToR from all of the available servers
                 target_tor = nr.randint(0, num_tors)
                 # for spine_idx in range(num_spines):
@@ -563,8 +590,9 @@ def adaptive(k, num_spines, distribution, distribution_name, inter_arrival, sys_
                 #     already_paired = True
                 # if not already_paired: # Each tor queue len should be available at one spine only
                 #     known_queue_len_spine[target_spine].update({target_tor: queue_lens_tors[target_tor]}) # Add SQ signal
+                decision_tag = 2 # Random-based decision
             if sq_update:
-                known_queue_len_spine[target_spine].update({random_tor: queue_lens_tors[random_tor]}) # Add SQ signal
+                known_queue_len_spine[target_spine].update({random_tor: None}) # Add SQ signal
             for idle_tor_list in idle_queue_spine:
                 if target_tor in idle_tor_list:   # tor that gets a random-assigned task removes itself from the idle queue it has joined
                     idle_tor_list.remove(target_tor)
@@ -579,11 +607,7 @@ def adaptive(k, num_spines, distribution, distribution_name, inter_arrival, sys_
         else: # No idle worker
             already_paired = False
             sq_update = False
-            if (len(known_queue_len_tor[target_tor]) < len(worker_indices)): # Tor scheduer still trying to get more queue len info
-                    num_msg += 1
-                    random_worker = random.choice(worker_indices)
-                    known_queue_len_tor[target_tor].update({random_worker: queue_lens_workers[random_worker]}) # Add SQ signal
-                    sq_update = True
+            
             if (len(known_queue_len_tor[target_tor]) > k): # Shortest queue if enough info is available
                 sample_workers = random.sample(list(known_queue_len_tor[target_tor]), k) # k samples from worker queue lenghts available
                 for worker_idx in sample_workers:
@@ -591,35 +615,47 @@ def adaptive(k, num_spines, distribution, distribution_name, inter_arrival, sys_
                     if sample_queue_len < min_load:
                         min_load = sample_queue_len
                         target_worker = worker_idx
+                if (len(known_queue_len_tor[target_tor]) < len(worker_indices)): # Tor scheduer still trying to get more queue len info
+                    num_msg += 1
+                    random_worker = random.choice(worker_indices)
+                    sq_update = True
             else: # Randomly select a worker from all of the available workers
                 target_worker = random.choice(worker_indices)
-                #known_queue_len_tor[target_tor].update({target_worker: queue_lens_workers[target_worker]}) # Add SQ signal
+                known_queue_len_tor[target_tor].update({target_worker: None}) # Add SQ signal
             if sq_update:
-                known_queue_len_tor[target_tor].update({random_worker: queue_lens_workers[random_worker]}) # Add SQ signal
+                known_queue_len_tor[target_tor].update({random_worker: None}) # Add SQ signal
         task_wait_time[target_worker].append(np.sum(task_lists[target_worker])) # Task assigned to target worker should wait at least as long as pending load
-        queue_len_signal[target_worker].append(queue_lens_workers[target_worker])
+        queue_len_signal[target_tor].append(queue_lens_tors[target_tor])
         task_lists[target_worker].append(load)
+        decision_type[target_worker].append(decision_tag)
         queue_lens_workers[target_worker] += 1
-        if known_queue_len_tor[target_tor]:
-            queue_lens_tors[target_tor] += 1.0 / len(known_queue_len_tor[target_tor]) # Increase average at ToR
+        queue_lens_tors[target_tor] = calculate_tor_queue_len(target_tor, queue_lens_workers) # queue_lens_tors is not used by algorithm. known_queue_len_tor is used
         
         if target_worker in known_queue_len_tor[target_tor]: # Update queue len of worker at ToR
-            known_queue_len_tor[target_tor].update({target_worker: queue_lens_workers[target_worker]})  
+            known_queue_len_tor[target_tor].update({target_worker: queue_lens_workers[target_worker]}) 
+
+        if known_queue_len_tor[target_tor]: # Some SQ signal available at ToR
+            sum_known_signals = 0
+            for queue_len in known_queue_len_tor[target_tor]:
+                sum_known_signals += queue_len
+            avg_known_queue_len = sum_known_signals / len(known_queue_len_tor[target_tor]) 
         
-        for spine_idx in range(num_spines): # ToR that is paired with a spine, will update the signal 
-            if target_tor in known_queue_len_spine[spine_idx]:
-                known_queue_len_spine[spine_idx].update({target_tor: queue_lens_tors[target_tor]}) # Update SQ signals
-                
+            for spine_idx in range(num_spines): # ToR that is linked with a spine, will update the signal 
+                if target_tor in known_queue_len_spine[spine_idx]:
+                    known_queue_len_spine[spine_idx].update({target_tor: avg_known_queue_len}) # Update SQ signals
+        #print queue_lens_tors
     #task_wait_time = np.array(task_wait_time).flatten()
     idle_avg /= len(distribution)
 
     flat_task_wait_time = [item for sublist in task_wait_time for item in sublist]
     flat_queue_len_signal = [item for sublist in queue_len_signal for item in sublist]
+    flat_decision_type = [item for sublist in decision_type for item in sublist]
 
     print ("Avg. #Idle workers Adaptive: " + str(idle_avg))
     print ("#msg Adaptive: " + str(num_msg))
     print ("#msg/s Adaptive: " + str((num_msg / (len(distribution) * inter_arrival))*(10**6)))
     msg_per_sec = (num_msg / (len(distribution) * inter_arrival))*(10**6)
+    write_to_file_decision_type('adaptive_k' + str(k), sys_load, distribution_name, flat_decision_type, num_spines=num_spines)
     write_to_file_wait_time('adaptive_k' + str(k), sys_load, distribution_name, flat_task_wait_time, num_spines=num_spines)
     write_to_file_queue_len_signal('adaptive_k' + str(k), sys_load, distribution_name, flat_queue_len_signal, num_spines=num_spines)
     write_to_file_msg('adaptive_k' + str(k), sys_load, distribution_name, [msg_per_sec], num_spines=num_spines)

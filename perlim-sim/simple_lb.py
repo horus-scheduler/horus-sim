@@ -4,7 +4,7 @@ import math
 import random 
 from multiprocessing import Process, Queue, Value, Array
 
-result_dir = "./results_10/"
+result_dir = "./results_7/"
 num_machines = 100
 num_dispatchers = 10
 
@@ -429,6 +429,7 @@ def adaptive(k, num_dispatchers, distribution, distribution_name, inter_arrival,
     for task_idx, load in enumerate(distribution):   # New task arrive
         #print queue_lens
         #print "\n List:"
+
         min_load = float("inf")
         num_idles = 0
         for queue_len in queue_lens:
@@ -458,20 +459,21 @@ def adaptive(k, num_dispatchers, distribution, distribution_name, inter_arrival,
             # print ("Idle queue: " + str(len(idle_queue[dispatcher])))
             # print (idle_queue)
             target_machine = idle_queue[dispatcher].pop(0)
-            
+            decision_tag = 0 # Idle-queue decision 
         else:   # No idle server is known, dispatch to a random server    
             already_paired = False
-            if (len(known_queue_len[dispatcher]) < partition_size):
+            
+            if (len(known_queue_len[dispatcher]) > k): # Do shortest queue if enough info available
+                sample_machines = random.sample(list(known_queue_len[dispatcher]), k) # k samples from queue lenghts available to that dispatcher
+            #     #print (sample_machines)
+                if (len(known_queue_len[dispatcher]) < partition_size):
                     num_msg += 1
                     random_machine = nr.randint(0, num_machines)
                     for d in range(num_dispatchers):
                         if random_machine in known_queue_len[d]:
                             already_paired = True
                     if not already_paired and queue_lens[random_machine] != 0: # Each server signal should be available at one dispatcher only
-                        known_queue_len[dispatcher].update({random_machine: queue_lens[random_machine]}) # Add SQ signal
-            if (len(known_queue_len[dispatcher]) > k): # Do shortest queue if enough info available
-                sample_machines = random.sample(list(known_queue_len[dispatcher]), k) # k samples from queue lenghts available to that dispatcher
-            #     #print (sample_machines)
+                        known_queue_len[dispatcher].update({random_machine: None}) # Add SQ signal
                 
                 for machine in sample_machines:
                     sample_queue_len = known_queue_len[dispatcher][machine]
@@ -479,16 +481,15 @@ def adaptive(k, num_dispatchers, distribution, distribution_name, inter_arrival,
                         min_load = sample_queue_len
                         target_machine = machine
                 decision_tag = 1 # SQ-based decision
-                # print ("Target machine: " + str(target_machine))
-                # print ("Load: " + str(min_load))
+                
             else:
                 target_machine = nr.randint(0, num_machines)
                 decision_tag = 2  # Random-based decision
-                # for d in range(num_dispatchers):
-                #     if target_machine in known_queue_len[d]:
-                #         already_paired = True
-                # if not already_paired and queue_lens[target_machine] != 0: # Each server signal should be available at one dispatcher only
-                #     known_queue_len[dispatcher].update({target_machine: queue_lens[target_machine]}) # Add SQ signal
+                for d in range(num_dispatchers):
+                    if target_machine in known_queue_len[d]:
+                        already_paired = True
+                if not already_paired and queue_lens[target_machine] != 0: # Each server signal should be available at one dispatcher only
+                    known_queue_len[dispatcher].update({target_machine: None}) # Add SQ signal
 
                 for idle_workers in idle_queue:
                     if target_machine in idle_workers:   # Machine that gets a random-assigned task removes itself from the idle queue it has joined
@@ -523,7 +524,7 @@ def adaptive(k, num_dispatchers, distribution, distribution_name, inter_arrival,
     print ("#msg/s Adaptive: " + str((num_msg / (len(distribution) * inter_arrival))*(10**6)))
     msg_per_sec = (num_msg / (len(distribution) * inter_arrival))*(10**6)
     write_to_file_wait_time('adaptive_k' + str(k), sys_load, distribution_name, flat_task_wait_time, num_dispatchers=num_dispatchers)
-    write_to_file_decision_type('adaptive_k' + str(k), sys_load, distribution_name, decision_type, num_dispatchers=num_dispatchers)
+    write_to_file_decision_type('adaptive_k' + str(k), sys_load, distribution_name, flat_decision_type, num_dispatchers=num_dispatchers)
     write_to_file_queue_len_signal('adaptive_k' + str(k), sys_load, distribution_name, flat_queue_len_signal, num_dispatchers=num_dispatchers)
     write_to_file_msg('adaptive_k' + str(k), sys_load, distribution_name, [msg_per_sec], num_dispatchers=num_dispatchers)
     write_to_file_idle_count('adaptive_k' + str(k), sys_load, distribution_name, idle_counts, num_dispatchers=num_dispatchers)
