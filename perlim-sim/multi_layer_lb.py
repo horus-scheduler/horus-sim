@@ -2,15 +2,19 @@ import numpy.random as nr
 import numpy as np
 import math
 import random 
+import sys
 from multiprocessing import Process, Queue, Value, Array
+from loguru import logger
 
-result_dir = "./dummy/"
+
+from utils import *
+from vcluster import VirtualCluster
 
 # 100 Machines M=2
 # num_pods = 2
 # spines_per_pod = 5
 # tors_per_pod = 10
-# workers_per_tor = 5
+# hosts_per_tor = 5
 
 # 200 Machines M=5
 # num_pods = 4
@@ -19,125 +23,12 @@ result_dir = "./dummy/"
 # workers_per_tor = 10
 
 # 200 Machines M=5
-num_pods = 4
-spines_per_pod = 2
-tors_per_pod = 5
-workers_per_tor = 5
 
 # 10 Machines M=2
 # num_pods = 1
 # spines_per_pod = 2
 # tors_per_pod = 5
 # workers_per_tor = 2
-
-cross_pod_assignment = False 
-
-num_tors = num_pods * tors_per_pod
-num_spines = spines_per_pod * num_pods
-num_workers = tors_per_pod * num_pods * workers_per_tor
-
-print ("Number of workers: " + str(num_workers))
-
-#loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6,0.7, 0.8, 0.85, 0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
-loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6,0.7, 0.8, 0.9, 0.95, 0.99]
-#loads = [0.4]
-task_time_distributions = ['bimodal']
-
-num_tasks = 100
-num_ticks = 50000 
-
-# Each tick is 0.1us so task load values are in 0.1us
-mean_task_small = 500.0
-mean_task_medium = 5000.0
-mean_task_large = 50000.0
-
-mu = 0.0
-sigma = 1.0
-
-#Assuming each tick is 0.1 us
-LINK_DELAY_TOR = range(40, 100)
-LINK_DELAY_SPINE = range(30, 60) 
-LINK_DELAY_CORE = range(20 , 40)
-
-# LINK_DELAY_TOR = range(0, 1)
-# LINK_DELAY_SPINE = range(0, 1) 
-# LINK_DELAY_CORE = range(0 , 1)
-
-log_normal_mean = math.e ** (mu + sigma ** 2 / 2)
-
-load_lognormal = nr.lognormal(mu, sigma, num_tasks)
-load_uniform = nr.uniform(0, 2*mean_task_small, num_tasks)
-
-bimodal_small = np.random.normal(mean_task_small, mean_task_small/10, num_tasks/2)
-bimodal_medium = np.random.normal(mean_task_medium, mean_task_medium/10, num_tasks/2)
-load_bimodal = np.concatenate([bimodal_small, bimodal_medium])
-
-indices = np.arange(load_bimodal.shape[0])
-np.random.shuffle(indices)
-load_bimodal = load_bimodal[indices]
-
-trimodal_small = np.random.normal(mean_task_small, mean_task_small/10, num_tasks/3)
-trimodal_medium = np.random.normal(mean_task_medium, mean_task_medium/10, num_tasks/3)
-trimodal_large = np.random.normal(mean_task_large, mean_task_large/10, num_tasks/3)
-load_trimodal = np.concatenate([trimodal_small, trimodal_medium, trimodal_large])
-
-indices = np.arange(load_trimodal.shape[0])
-np.random.shuffle(indices)
-load_trimodal = load_trimodal[indices]
-
-def print_result(result):
-    print ("\nMax wait: " + str(np.max(result)))
-    print ("Avg wait: " + str(np.mean(result)))
-    #print("Ideal load:" + str((np.sum(distribution)/ num_workers)))
-    print ("50 Percentile: " + str(np.percentile(result, 50)))
-    print ("75 Percentile: " + str(np.percentile(result, 75)))
-    print ("90 Percentile: " + str(np.percentile(result, 90)))
-    print ("99 Percentile: " + str(np.percentile(result, 99)))
-
-def calculate_network_time(first_spine, target_worker):
-    network_time = random.sample(LINK_DELAY_TOR, 1)[0] + random.sample(LINK_DELAY_SPINE, 1)[0] # At leaast 2 hop from spine to worker
-    connected_tors = get_tor_partition_range_for_spine(first_spine)
-    target_tor = get_tor_idx_for_worker(target_worker)
-    # print ("First spine: " + str(first_spine))
-    # print ("Target worker: " + str(target_worker))
-    # print ("Connected tors: " )
-    #print connected_tors
-
-    if target_tor not in connected_tors: # 2x Core-spine delay
-        network_time += random.sample(LINK_DELAY_CORE, 1)[0]
-        network_time += random.sample(LINK_DELAY_CORE, 1)[0]
-    #print ("Network time: " + str(network_time))
-    return network_time
-
-def calculate_num_hops(first_spine, target_worker):
-    connected_tors = get_tor_partition_range_for_spine(first_spine)
-    target_tor = get_tor_idx_for_worker(target_worker)
-    num_hops = 2
-    if target_tor not in connected_tors: # 2x Core-spine delay
-        num_hops += 1
-    return num_hops
-
-def calculate_num_state(switch_state_tor, switch_state_spine, primary_signal_tor, primary_signal_spine, secondary_signal_tor=None, secondary_signal_spine=None):
-    for tor_idx in range(num_tors):
-        if secondary_signal_tor:
-            switch_state_tor[tor_idx].append(len(primary_signal_tor[tor_idx]) + len(secondary_signal_tor[tor_idx]))
-        else:
-            switch_state_tor[tor_idx].append(len(primary_signal_tor[tor_idx]))
-    
-    for spine_idx in range(num_spines):
-        if secondary_signal_spine:
-            switch_state_spine[spine_idx].append(len(primary_signal_spine[spine_idx]) + len(secondary_signal_spine[spine_idx]))
-        else:
-            switch_state_spine[spine_idx].append(len(primary_signal_spine[spine_idx]))
-
-    return switch_state_tor, switch_state_spine
-
-def calculate_idle_count(queue_lens_workers):
-    num_idles = 0
-    for queue_len in queue_lens_workers:
-        if queue_len ==0:
-            num_idles += 1
-    return num_idles
 
 def process_network(in_transit_tasks, ticks_passed):
     arrived_tasks = []
@@ -153,9 +44,10 @@ def process_network(in_transit_tasks, ticks_passed):
 
     return in_transit_tasks, arrived_tasks
 
-class task:  
-    def __init__(self, task_id, load): 
-        self.task_id = task_id
+class Task:  
+    def __init__(self, task_id, load, vcluster): 
+        self.vcluster = vcluster
+        self.task_id = vcluster.task_id
         self.load = load
         self.decision_tag = 0 
 
@@ -163,71 +55,44 @@ class task:
         self.target_worker = target_worker
         self.target_tor = target_tor
         self.first_spine = first_spine
+
+        self.global_worker_id = self.vcluster.worker_start_idx + target_worker 
+        self.global_host_id = self.vcluster.host_list[target_worker]
+        self.global_spine_id = self.vcluster.selected_spine_list[first_spine]
+        self.global_tor_id = self.vcluster.tor_id_unique_list[target_tor]
+
         self.network_time = calculate_network_time(first_spine, target_worker) # This one changes during process
         self.num_hops = calculate_num_hops(first_spine, target_worker)
         self.transfer_time = self.network_time
 
-def normalize(load):
-    return (load / log_normal_mean) * mean_task
-
-def get_tor_idx_for_worker(worker_idx):
-    return int(worker_idx / workers_per_tor)
-
-def get_worker_range_for_tor(tor_idx):
-    workers_start_idx = tor_idx * workers_per_tor # Each ToR is has access to workers_per_tor machines
-    return range(workers_start_idx, workers_start_idx + workers_per_tor)
-
-#Used for partitioned pow-of-k SQ
-def get_tor_partition_range_for_spine(spine_idx): 
-    partition_size = tors_per_pod / spines_per_pod
-    tor_start_idx = spine_idx * partition_size
-    return range(tor_start_idx, tor_start_idx + partition_size)
-
-def get_spine_idx_for_tor(tor_idx):
-    partition_size = tors_per_pod / spines_per_pod
-    return int(tor_idx / partition_size)
-
-def calculate_tor_queue_len(tor_idx, queue_lens_workers):
-    worker_range = get_worker_range_for_tor(tor_idx)
-    sum_queue_len = 0
-    for worker_idx in worker_range:
-        sum_queue_len += queue_lens_workers[worker_idx]
-    return float(sum_queue_len) / workers_per_tor
-
-def write_to_file(metric, policy, load, distribution, results, num_spines = 1):
-    filename = policy + '_' + distribution + '_' + 'n' + str(num_workers) + '_m' + str(num_spines) + '_' + metric +  '_' + str(load) + '.csv'
-    
-    with open(result_dir + filename, 'wb') as output_file:
-        for i, value in enumerate(results):
-            if i < len(results) - 1:
-                output_file.write(str(value) + ', ')
-            else:
-                output_file.write(str(value))
-
-def jiq_server_process(idle_queue_tor, idle_queue_spine, num_msg_tor, num_msg_spine, num_spines, k, worker_idx):
+def jiq_server_process(vcluster, num_msg_tor, num_msg_spine, num_spines, k, worker_idx, tor_idx):
     min_idle_queue = float("inf")
-    sample_indices = random.sample(range(0, num_spines), k) # Sample k dispatchers
+    sample_indices = random.sample(range(0, vcluster.num_spines), k) # Sample k spines
     #print sample_indices
     for idx in sample_indices:  # Find the sampled spine with min idle queue len
-        sample = len(idle_queue_spine[idx])
-        num_msg_spine[idx] += 1   # k msgs for sampling spine idle queues
-        if sample < min_idle_queue:
-            min_idle_queue = sample
-            target_spine = idx
-    tor_idx = get_tor_idx_for_worker(worker_idx)
-    
-    idle_queue_tor[tor_idx].append(worker_idx) # Add idle worker to idle queue of ToR
-    num_msg_tor[tor_idx] += 1    #1 msg for updating tor idle queue
+        sampled_value = len(vcluster.idle_queue_spine[idx])
+        sampled_spine_id = vcluster.selected_spine_list[idx]
+
+        num_msg_spine[sampled_spine_id] += 1   # total k msgs for sampling spine idle queues
+        if sampled_value < min_idle_queue:
+            min_idle_queue = sampled_value
+            target_spine_idx = idx
+
+    vcluster.idle_queue_tor[tor_idx].append(worker_idx) # Add idle worker to idle queue of ToR
+    tor_id = vcluster.tor_id_unique_list[tor_idx]
+
+    num_msg_tor[tor_id] += 1    #1 msg for updating tor idle queue
     
     already_paired = False
-    for spine_idx in range(num_spines):
+    for spine_idx in range(vcluster.num_spines):
         if tor_idx in idle_queue_spine[spine_idx]:
             already_paired = True
 
     if not already_paired:
-        idle_queue_spine[target_spine].append(tor_idx) # Add ToR to the idle queue of selected spine
-        num_msg_spine[target_spine] += 1 # 1 msg for updating spine idle queue
-    return idle_queue_tor, idle_queue_spine, num_msg_tor, num_msg_spine
+        idle_queue_spine[target_spine_idx].append(tor_idx) # Add ToR to the idle queue of selected spine
+        target_spine_id = vcluster.selected_spine_list[target_spine_idx]
+        num_msg_spine[target_spine_id] += 1 # 1 msg for updating spine idle queue
+    return vcluster, num_msg_tor, num_msg_spine
 
 def adaptive_server_process(idle_queue_tor, idle_queue_spine, known_queue_len_tor, known_queue_len_spine, num_msg_tor, num_msg_spine, num_spines, k, worker_idx):
     min_idle_queue = float("inf")
@@ -278,6 +143,16 @@ def process_tasks_fcfs(
     known_queue_len_tor=None,
     known_queue_len_spine=None
     ):
+    
+    task_lists = vcluster.task_lists
+    inter_arrival = vcluster.inter_arrival
+    queue_lens_workers = vcluster.queue_lens_workers
+    queue_lens_tors = vcluster.queue_lens_tors
+    host_list = vcluster.host_list
+    # num_msg_tor = vcluster.num_msg_tor
+    # num_msg_spine = vcluster.num_msg_spine
+    num_spines = vcluster.num_spines
+
     for i in range(len(task_lists)):
         while task_lists[i]:    # while there are any tasks in list
             remaining_time = task_lists[i][0] - inter_arrival   # First task in list is being executed
@@ -285,32 +160,36 @@ def process_tasks_fcfs(
             if task_lists[i][0] == 0:   # If finished executing task
                 task_lists[i].pop(0)        # Remove from list
                 queue_lens_workers[i] -= 1       # Decrement worker queue len
-                tor_idx = get_tor_idx_for_worker(i)
-                queue_lens_tors[tor_idx] = calculate_tor_queue_len(tor_idx, queue_lens_workers)
+
+                tor_id = get_tor_idx_for_host(host_list[i])
+                # Conversion for mapping to cluster's local lists
+                tor_idx = vcluster.tor_id_unique_list.index(tor_id)
+
+                queue_lens_tors[tor_idx] = calculate_tor_queue_len(tor_id, queue_lens_workers, host_list)
 
                 # if queue_lens_tors[tor_idx] < 0:
                 #     print ("ERROR")
                 #     print("Tor: " + str(tor_idx) + "worker: " + str(i))
                 if (policy == 'pow_of_k') or (policy == 'pow_of_k_partitioned'): # Random and JIQ do not use this part
-                    if (num_msg_tor is not None): # TODO @parham: Shouldn't be None -> remove this line 
-                        num_msg_tor[tor_idx] += 1 # Update worker queuelen at ToR
-                        if policy == 'pow_of_k':
-                            for spine_idx in range(num_spines):
-                                num_msg_spine[spine_idx] += 1 # Update ToR queue len at spines
-                        else:
-                            spine_idx = get_spine_idx_for_tor(tor_idx) 
-                            num_msg_spine[spine_idx] += 1
+                    num_msg_tor[tor_id] += 1 # Update worker queuelen at ToR
+                    if policy == 'pow_of_k':
+                        # Update ToR queue len at all of the spines
+                        for spine_id in vcluster.selected_spine_list:
+                            num_msg_spine[spine_id] += 1 
+                    else: # Only update the designated spine
+                        mapped_spine = vcluster.tor_spine_map[tor_idx]
+                        num_msg_spine[mapped_spine] += 1
                 else: #JIQ and adaptive
                     if policy == 'jiq': # JIQ
                         if queue_lens_workers[i] == 0: # Process for when a server becomes idle 
-                            idle_queue_tor, idle_queue_spine, num_msg_tor, num_msg_spine = jiq_server_process(
-                                idle_queue_tor,
-                                idle_queue_spine,
+                            vcluster, num_msg_tor, num_msg_spine = jiq_server_process(
+                                vcluster, 
                                 num_msg_tor,
                                 num_msg_spine,
                                 num_spines,
                                 k,
-                                i)
+                                i,
+                                tor_idx)
                     elif policy == 'adaptive': # Adaptive
                         if queue_lens_workers[i] == 0: # Process for when a server becomes idle 
                             idle_queue_tor, idle_queue_spine, known_queue_len_tor, known_queue_len_spine, num_msg_tor, num_msg_spine = adaptive_server_process(
@@ -338,11 +217,13 @@ def process_tasks_fcfs(
     return task_lists, queue_lens_workers, queue_lens_tors, num_msg_tor, num_msg_spine, idle_queue_tor, idle_queue_spine, known_queue_len_tor, known_queue_len_spine
 
 def schedule_task_random(new_task):
-    target_spine = random.randrange(num_spines)  # Emulating arrival at a spine randomly
-    target_tor = 1 # Dummy, not used in random as it randomly selects the *workers* don't care about ToRs
-    target_worker = nr.randint(0, num_workers) # Make decision
+    # Emulating arrival at a spine randomly
+    target_spine = random.randrange(new_task.vcluster.num_spines)  
     
-    new_task.set_decision(target_spine, 0, target_worker)
+    target_tor = random.randrange(new_task.vcluster.num_tors) # Dummy, not used in random as it randomly selects the *workers* don't care about ToRs
+    target_worker = nr.randint(0, new_task.vcluster.num_workers) # Make decision
+    
+    new_task.set_decision(target_spine, target_tor, target_worker)
     return new_task
 
 def schedule_task_pow_of_k(new_task, k, queue_lens_workers, queue_lens_tors):
@@ -517,16 +398,31 @@ def schedule_task_adaptive(new_task, k, queue_lens_workers, queue_lens_tors, idl
 def run_scheduling(policy, k, num_spines, distribution, distribution_name, inter_arrival, sys_load):
     nr.seed()
     random.seed()
+    
+    vcluster_list = []
+
+
+    tenants = data['tenants']
+    tenants_maps = tenants['maps']
+    worker_start_idx = 0 # Used for mapping local worker_id to global_worker_id
+    for t in range(len(tenants_maps)):
+        host_list = tenants_maps[t]['worker_to_host_map']
+        cluster_id = tenants_maps[t]['app_id']
+        vcluster = VirtualCluster(cluster_id, worker_start_idx, policy, host_list, sys_load, distribution)
+        vcluster_list.append(vcluster)
+
+        worker_start_idx += tenants_maps[t]['worker_count']
+
     queue_lens_workers = [0] * num_workers
     queue_lens_tors = [0.0] * num_tors
 
     task_lists = [] * num_workers
     
-    idle_queue_tor = [] * num_tors
-    idle_queue_spine = [] * num_spines
+    #idle_queue_tor = [] * num_tors
+    #idle_queue_spine = [] * num_spines
 
-    known_queue_len_spine = [] * num_spines  # For each spine, list of maps between torID and average queueLen if ToR
-    known_queue_len_tor = [] * num_tors # For each tor, list of maps between workerID and queueLen
+    #known_queue_len_spine = [] * num_spines  # For each spine, list of maps between torID and average queueLen if ToR
+    #known_queue_len_tor = [] * num_tors # For each tor, list of maps between workerID and queueLen
     
     log_queue_len_signal_tors = []  # For analysis only 
     log_queue_len_signal_workers = [] 
@@ -541,30 +437,30 @@ def run_scheduling(policy, k, num_spines, distribution, distribution_name, inter
     
     decision_tag = 0
 
-    num_msg_spine = [0] * num_spines  
-    num_msg_tor = [0] * num_tors  
-    switch_state_spine = [] * num_spines 
-    switch_state_tor = [] * num_tors
+    aggregate_num_msg_spine = [0] * num_spines  
+    aggregate_num_msg_tor = [0] * num_tors
+    aggregate_switch_state_spine = [] * num_spines 
+    aggregate_switch_state_tor = [] * num_tors
 
     num_msg = 0
     idle_avg = 0
     idle_counts = []
 
-    for i in range(num_workers):
-        task_lists.append([])
-
+    # for i in range(num_workers):
+    #     task_lists.append([])
+    
     for spine_idx in range(num_spines):
-        idle_queue_spine.append(get_tor_partition_range_for_spine(spine_idx))
-        known_queue_len_spine.append({})
+        # idle_queue_spine.append(get_tor_partition_range_for_spine(spine_idx))
+        # known_queue_len_spine.append({})
         switch_state_spine.append([])
 
     for tor_idx in range(num_tors):
-        idle_queue_tor.append(get_worker_range_for_tor(tor_idx))
-        known_queue_len_tor.append({})
+        # idle_queue_tor.append(get_worker_range_for_tor(tor_idx))
+        # known_queue_len_tor.append({})
         switch_state_tor.append([])
 
-    last_task_arrival = 0.0
-    task_idx = 0
+    #last_task_arrival = 0.0
+    #task_idx = 0
     for tick in range(num_ticks):    
         task_lists, queue_lens_workers, queue_lens_tors, num_msg_tor, num_msg_spine, idle_queue_tor, idle_queue_spine, known_queue_len_tor, known_queue_len_spine = process_tasks_fcfs(
                 policy,
@@ -583,6 +479,7 @@ def run_scheduling(policy, k, num_spines, distribution, distribution_name, inter
                 known_queue_len_spine
                 )
         in_transit_tasks, arrived_tasks = process_network(in_transit_tasks, ticks_passed=1)
+
         for arrived_task in arrived_tasks:
             #print arrived_task.target_worker
             log_task_wait_time.append(np.sum(task_lists[arrived_task.target_worker])) # Task assigned to target worker should wait at least as long as pending load
@@ -615,66 +512,71 @@ def run_scheduling(policy, k, num_spines, distribution, distribution_name, inter
                     log_known_queue_len_spine.append(avg_known_queue_len)
                 else:
                     log_known_queue_len_spine.append(0)
-        if (tick - last_task_arrival) > inter_arrival and task_idx < len(distribution): # New task arrives
-            last_task_arrival = tick
+        
+        # A service might have different number of workers, so its Max Load will be different than others.
+        # Process each service independently based on its load:
+        for vcluster in vcluster_list:
+            if (tick - vcluster.last_task_arrival) > vcluster.inter_arrival and vcluster.task_idx < len(vcluster.distribution): # New task arrives
+                vcluster.last_task_arrival = tick
 
-            num_idles = calculate_idle_count(queue_lens_workers)
-            idle_counts.append(num_idles)
-            
-            load = distribution[task_idx] # Pick new task load
-            new_task = task(task_idx, load)
-            
-            if policy == 'random':
-                scheduled_task = schedule_task_random(new_task)
-            elif policy == 'pow_of_k':
-                scheduled_task = schedule_task_pow_of_k(new_task, k, queue_lens_workers, queue_lens_tors)
-                for spine_idx in range(num_spines):
-                    switch_state_spine[spine_idx].append(num_tors)
-                for tor_idx in range(num_tors):
-                    switch_state_tor[tor_idx].append(workers_per_tor)
+                num_idles = calculate_idle_count(queue_lens_workers)
+                idle_counts.append(num_idles)
                 
-            elif policy == 'pow_of_k_partitioned':
-                scheduled_task = schedule_task_pow_of_k_partitioned(new_task, k, queue_lens_workers, queue_lens_tors)
-                for spine_idx in range(num_spines):
-                    switch_state_spine[spine_idx].append(partition_size_spine)
-                for tor_idx in range(num_tors):
-                    switch_state_tor[tor_idx].append(workers_per_tor)
+                load = vcluster.distribution[vcluster.task_idx] # Pick new task load
+                new_task = Task(load, vcluster)
+                
+                if policy == 'random':
+                    scheduled_task = schedule_task_random(new_task)
 
-            elif policy == 'jiq':
-                scheduled_task, idle_queue_tor, idle_queue_spine, num_msg_tor, num_msg_spine = schedule_task_jiq(
-                    new_task,
-                    queue_lens_workers,
-                    queue_lens_tors,
-                    idle_queue_tor,
-                    idle_queue_spine,
-                    num_msg_tor, 
-                    num_msg_spine)
-                switch_state_tor, switch_state_spine = calculate_num_state(
-                    switch_state_tor,
-                    switch_state_spine,
-                    primary_signal_tor=idle_queue_tor,
-                    primary_signal_spine=idle_queue_spine)
-            elif policy == 'adaptive':
-                scheduled_task, idle_queue_tor, idle_queue_spine, known_queue_len_tor, known_queue_len_spine, num_msg_tor, num_msg_spine = schedule_task_adaptive(
-                    new_task,
-                    k,
-                    queue_lens_workers,
-                    queue_lens_tors,
-                    idle_queue_tor,
-                    idle_queue_spine,
-                    known_queue_len_tor,
-                    known_queue_len_spine,
-                    num_msg_tor, 
-                    num_msg_spine)
-                switch_state_tor, switch_state_spine = calculate_num_state(
-                    switch_state_tor,
-                    switch_state_spine,
-                    primary_signal_tor=idle_queue_tor,
-                    primary_signal_spine=idle_queue_spine,
-                    secondary_signal_tor=known_queue_len_tor,
-                    secondary_signal_spine=known_queue_len_spine)
-            in_transit_tasks.append(scheduled_task)
-            task_idx += 1
+                elif policy == 'pow_of_k':
+                    scheduled_task = schedule_task_pow_of_k(new_task, k, queue_lens_workers, queue_lens_tors)
+                    for spine_idx in range(num_spines):
+                        switch_state_spine[spine_idx].append(num_tors)
+                    for tor_idx in range(num_tors):
+                        switch_state_tor[tor_idx].append(workers_per_tor)
+                    
+                elif policy == 'pow_of_k_partitioned':
+                    scheduled_task = schedule_task_pow_of_k_partitioned(new_task, k, queue_lens_workers, queue_lens_tors)
+                    for spine_idx in range(num_spines):
+                        switch_state_spine[spine_idx].append(partition_size_spine)
+                    for tor_idx in range(num_tors):
+                        switch_state_tor[tor_idx].append(workers_per_tor)
+
+                elif policy == 'jiq':
+                    scheduled_task, idle_queue_tor, idle_queue_spine, num_msg_tor, num_msg_spine = schedule_task_jiq(
+                        new_task,
+                        queue_lens_workers,
+                        queue_lens_tors,
+                        idle_queue_tor,
+                        idle_queue_spine,
+                        num_msg_tor, 
+                        num_msg_spine)
+                    switch_state_tor, switch_state_spine = calculate_num_state(
+                        switch_state_tor,
+                        switch_state_spine,
+                        primary_signal_tor=idle_queue_tor,
+                        primary_signal_spine=idle_queue_spine)
+                elif policy == 'adaptive':
+                    scheduled_task, idle_queue_tor, idle_queue_spine, known_queue_len_tor, known_queue_len_spine, num_msg_tor, num_msg_spine = schedule_task_adaptive(
+                        new_task,
+                        k,
+                        queue_lens_workers,
+                        queue_lens_tors,
+                        idle_queue_tor,
+                        idle_queue_spine,
+                        known_queue_len_tor,
+                        known_queue_len_spine,
+                        num_msg_tor, 
+                        num_msg_spine)
+                    switch_state_tor, switch_state_spine = calculate_num_state(
+                        switch_state_tor,
+                        switch_state_spine,
+                        primary_signal_tor=idle_queue_tor,
+                        primary_signal_spine=idle_queue_spine,
+                        secondary_signal_tor=known_queue_len_tor,
+                        secondary_signal_spine=known_queue_len_spine)
+                in_transit_tasks.append(scheduled_task)
+                vcluster.task_idx += 1
 
 
     if policy == 'random':
@@ -697,7 +599,7 @@ def run_scheduling(policy, k, num_spines, distribution, distribution_name, inter
     mean_state_spine = [np.mean(x) for x in switch_state_spine]
     max_state_tor = [max(x) for x in switch_state_tor]
     mean_state_tor = [np.mean(x) for x in switch_state_tor]
-    print mean_state_tor
+    #print mean_state_tor
     # exit(0)
     write_to_file('wait_times', policy_file_tag, sys_load, distribution_name,  log_task_wait_time, num_spines=num_spines)
     write_to_file('transfer_times', policy_file_tag, sys_load, distribution_name, log_task_transfer_time, num_spines=num_spines)
