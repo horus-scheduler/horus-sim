@@ -2,6 +2,7 @@ import os
 import random
 import sys
 import math
+import csv
 import numpy.random as nr
 import numpy as np
 from loguru import logger
@@ -9,34 +10,35 @@ from loguru import logger
 from tenants import Tenants
 from placement import Placement
 
-result_dir = "./dummy/"
+result_dir = "./results_scale_0/"
 
-num_pods = 8
+num_tenants = 3000
+num_pods = 48
 num_spines = int(num_pods * num_pods / 2)
 num_tors = int(num_pods * num_pods / 2)
 
 spines_per_pod = int(num_spines / num_pods)
 tors_per_pod = int(num_tors / num_pods)
-hosts_per_tor = 12
-num_workers = tors_per_pod * num_pods * hosts_per_tor
+hosts_per_tor = 24
+num_hosts = tors_per_pod * num_pods * hosts_per_tor
 
 cross_pod_assignment = False 
-logger.info("Number of workers: " + str(num_workers))
+logger.info("Number of hosts: " + str(num_hosts))
 
-logger.add(sys.stdout, level='TRACE')
+logger.add(result_dir + 'summary.log', level='INFO')
 data = dict()
-tenants = Tenants(data)
-placement = Placement(data)
+tenants = Tenants(data, num_tenants=num_tenants, min_workers=10, max_workers=2000)
+placement = Placement(data, num_pods=num_pods, num_leafs_per_pod=tors_per_pod, num_hosts_per_leaf=hosts_per_tor, max_workers_per_host=16)
 logger.info(data)
 logger.info('Generating tenants is done')
 
 #loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6,0.7, 0.8, 0.85, 0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
-#loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6,0.7, 0.8, 0.9, 0.95, 0.99]
-loads = [0.4]
+loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99]
+#loads = [0.4]
 task_time_distributions = ['bimodal']
 
-num_tasks = 100
-num_ticks = 50000 
+#num_tasks = 6000
+num_ticks = 500000000
 
 # Each tick is 0.1us so task load values are in 0.1us
 mean_task_small = 500.0
@@ -55,27 +57,37 @@ LINK_DELAY_CORE = range(20 , 40)
 # LINK_DELAY_SPINE = range(0, 1) 
 # LINK_DELAY_CORE = range(0 , 1)
 
-log_normal_mean = math.e ** (mu + sigma ** 2 / 2)
 
-load_lognormal = nr.lognormal(mu, sigma, num_tasks)
-load_uniform = nr.uniform(0, 2*mean_task_small, num_tasks)
+def generate_task_dist(num_workers, distribution_name=None):
+    log_normal_mean = math.e ** (mu + sigma ** 2 / 2)
 
-bimodal_small = np.random.normal(mean_task_small, mean_task_small/10, int(num_tasks/2))
-bimodal_medium = np.random.normal(mean_task_medium, mean_task_medium/10, int(num_tasks/2))
-load_bimodal = np.concatenate([bimodal_small, bimodal_medium])
+    # TODO @parham: Should we set number of tasks in each cluster?
+    # Choose total taks amount relative to number of workers
+    num_tasks = 40 * num_workers
+    
+    load_lognormal = nr.lognormal(mu, sigma, num_tasks)
+    load_uniform = nr.uniform(0, 2*mean_task_small, num_tasks)
 
-indices = np.arange(load_bimodal.shape[0])
-np.random.shuffle(indices)
-load_bimodal = load_bimodal[indices]
+    bimodal_small = np.random.normal(mean_task_small, mean_task_small/10, int(num_tasks/2))
+    bimodal_medium = np.random.normal(mean_task_medium, mean_task_medium/10, int(num_tasks/2))
+    load_bimodal = np.concatenate([bimodal_small, bimodal_medium])
 
-trimodal_small = np.random.normal(mean_task_small, mean_task_small/10, int(num_tasks/3))
-trimodal_medium = np.random.normal(mean_task_medium, mean_task_medium/10, int(num_tasks/3))
-trimodal_large = np.random.normal(mean_task_large, mean_task_large/10, int(num_tasks/3))
-load_trimodal = np.concatenate([trimodal_small, trimodal_medium, trimodal_large])
+    indices = np.arange(load_bimodal.shape[0])
+    np.random.shuffle(indices)
+    load_bimodal = load_bimodal[indices]
 
-indices = np.arange(load_trimodal.shape[0])
-np.random.shuffle(indices)
-load_trimodal = load_trimodal[indices]
+    trimodal_small = np.random.normal(mean_task_small, mean_task_small/10, int(num_tasks/3))
+    trimodal_medium = np.random.normal(mean_task_medium, mean_task_medium/10, int(num_tasks/3))
+    trimodal_large = np.random.normal(mean_task_large, mean_task_large/10, int(num_tasks/3))
+    load_trimodal = np.concatenate([trimodal_small, trimodal_medium, trimodal_large])
+
+    indices = np.arange(load_trimodal.shape[0])
+    np.random.shuffle(indices)
+    load_trimodal = load_trimodal[indices]
+    if distribution_name == 'bimodal':
+        return load_bimodal
+    elif distribution_name == 'trimodal':
+        return log_trimodal
 
 def get_tor_id_for_host(host_id):
     return int(host_id / hosts_per_tor)
@@ -103,10 +115,21 @@ def get_spine_range_for_tor(tor_idx):
 def calculate_tor_queue_len(tor_id, queue_lens_workers, host_list):
     host_range = get_host_range_for_tor(tor_id)
     sum_queue_len = 0
+    num_workers_in_tor = 0
     for idx, host in enumerate(host_list):
         if host in host_range: # Host connected to ToR so will consider this in calculations
             sum_queue_len += queue_lens_workers[idx]
-    return float(sum_queue_len) / workers_per_tor
+            num_workers_in_tor += 1
+    return float(sum_queue_len) / num_workers_in_tor
+
+def get_worker_indices_for_tor(tor_id, host_list):
+    host_range = get_host_range_for_tor(tor_id)
+    workers_list = []
+    for idx, host in enumerate(host_list):
+        if host in host_range: # Host of worker connected to ToR
+            workers_list.append(idx)
+            
+    return workers_list
 
 def calculate_network_time(first_spine, target_host):
     # At leaast 2 hop from spine to worker
@@ -125,28 +148,14 @@ def calculate_network_time(first_spine, target_host):
     #print ("Network time: " + str(network_time))
     return network_time
 
-def calculate_num_hops(first_spine, target_worker):
+def calculate_num_hops(first_spine, target_host):
     connected_tors = get_tor_partition_range_for_spine(first_spine)
-    target_tor = get_tor_idx_for_worker(target_worker)
+    target_tor = get_tor_id_for_host(target_host)
     num_hops = 2
     if target_tor not in connected_tors: # 2x Core-spine delay
         num_hops += 1
     return num_hops
 
-def calculate_num_state(switch_state_tor, switch_state_spine, primary_signal_tor, primary_signal_spine, secondary_signal_tor=None, secondary_signal_spine=None):
-    for tor_idx in range(num_tors):
-        if secondary_signal_tor:
-            switch_state_tor[tor_idx].append(len(primary_signal_tor[tor_idx]) + len(secondary_signal_tor[tor_idx]))
-        else:
-            switch_state_tor[tor_idx].append(len(primary_signal_tor[tor_idx]))
-    
-    for spine_idx in range(num_spines):
-        if secondary_signal_spine:
-            switch_state_spine[spine_idx].append(len(primary_signal_spine[spine_idx]) + len(secondary_signal_spine[spine_idx]))
-        else:
-            switch_state_spine[spine_idx].append(len(primary_signal_spine[spine_idx]))
-
-    return switch_state_tor, switch_state_spine
 
 def calculate_idle_count(queue_lens_workers):
     num_idles = 0
@@ -155,12 +164,12 @@ def calculate_idle_count(queue_lens_workers):
             num_idles += 1
     return num_idles
 
-def write_to_file(metric, policy, load, distribution, results, num_spines = 1):
-    filename = policy + '_' + distribution + '_' + 'n' + str(num_workers) + '_m' + str(num_spines) + '_' + metric +  '_' + str(load) + '.csv'
-    
+def write_to_file(metric, policy, load, distribution, results):
+    filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' +metric +  '_' + str(load) + '.csv'
+    np_array = np.array(results)
     with open(result_dir + filename, 'wb') as output_file:
-        for i, value in enumerate(results):
-            if i < len(results) - 1:
-                output_file.write(str(value) + ', ')
-            else:
-                output_file.write(str(value))
+        #writer = csv.writer(output_file, delimiter=',')
+        #writer.writerow(np_array)
+        np.savetxt(output_file, [np_array], delimiter=', ', fmt='%.2f')
+        #np.savetxt(output_file, np_array, delimiter=",")
+        

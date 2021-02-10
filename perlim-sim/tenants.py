@@ -3,7 +3,7 @@ import pandas as pd
 from loguru import logger
 
 class Tenants:
-    def __init__(self, data, num_tenants=20, min_workers=2, max_workers=200):
+    def __init__(self, data, num_tenants=100, min_workers=5, max_workers=200):
         self.data = data
         self.num_tenants = num_tenants
         self.min_workers = min_workers
