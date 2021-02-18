@@ -5,14 +5,17 @@ import math
 import csv
 import numpy.random as nr
 import numpy as np
-from loguru import logger
-
+import ast
 from tenants import Tenants
 from placement import Placement
 
-result_dir = "./results_scale_0/"
+result_dir = "./results_correct_l10/"
 
 num_tenants = 3000
+min_workers= 10
+max_workers = 2000
+max_workers_per_host = 16
+
 num_pods = 48
 num_spines = int(num_pods * num_pods / 2)
 num_tors = int(num_pods * num_pods / 2)
@@ -22,23 +25,17 @@ tors_per_pod = int(num_tors / num_pods)
 hosts_per_tor = 24
 num_hosts = tors_per_pod * num_pods * hosts_per_tor
 
-cross_pod_assignment = False 
-logger.info("Number of hosts: " + str(num_hosts))
-
-logger.add(result_dir + 'summary.log', level='INFO')
-data = dict()
-tenants = Tenants(data, num_tenants=num_tenants, min_workers=10, max_workers=2000)
-placement = Placement(data, num_pods=num_pods, num_leafs_per_pod=tors_per_pod, num_hosts_per_leaf=hosts_per_tor, max_workers_per_host=16)
-logger.info(data)
-logger.info('Generating tenants is done')
+cross_pod_assignment = True 
 
 #loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6,0.7, 0.8, 0.85, 0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
-loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99]
-#loads = [0.4]
+#loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99]
+loads = [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]
+#loads = [0.99]
+
 task_time_distributions = ['bimodal']
 
 #num_tasks = 6000
-num_ticks = 500000000
+#num_ticks = 500000000
 
 # Each tick is 0.1us so task load values are in 0.1us
 mean_task_small = 500.0
@@ -57,13 +54,21 @@ LINK_DELAY_CORE = range(20 , 40)
 # LINK_DELAY_SPINE = range(0, 1) 
 # LINK_DELAY_CORE = range(0 , 1)
 
+NUM_TASK_PER_WORKER = 20
+
+def read_dataset():
+    filename = result_dir + 'summary_system.log'
+    fp = open(filename)
+    lines = fp.readlines()
+    data = ast.literal_eval(lines[3])
+    return dict(data)
 
 def generate_task_dist(num_workers, distribution_name=None):
     log_normal_mean = math.e ** (mu + sigma ** 2 / 2)
 
     # TODO @parham: Should we set number of tasks in each cluster?
     # Choose total taks amount relative to number of workers
-    num_tasks = 40 * num_workers
+    num_tasks = NUM_TASK_PER_WORKER * num_workers
     
     load_lognormal = nr.lognormal(mu, sigma, num_tasks)
     load_uniform = nr.uniform(0, 2*mean_task_small, num_tasks)
@@ -156,16 +161,29 @@ def calculate_num_hops(first_spine, target_host):
         num_hops += 1
     return num_hops
 
-
 def calculate_idle_count(queue_lens_workers):
     num_idles = 0
     for queue_len in queue_lens_workers:
         if queue_len ==0:
             num_idles += 1
     return num_idles
-
-def write_to_file(metric, policy, load, distribution, results):
-    filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' +metric +  '_' + str(load) + '.csv'
+def get_policy_file_tag(policy, k):
+    if policy == 'random':
+        policy_file_tag = policy
+    elif policy == 'pow_of_k':
+        policy_file_tag = 'sparrow_k' + str(k)
+    elif policy == 'pow_of_k_partitioned':
+        policy_file_tag = 'racksched_k' + str(k)
+    elif policy == 'jiq':
+        policy_file_tag = 'jiq_k' + str(k)
+    elif policy == 'adaptive':
+        policy_file_tag = 'adaptive_k' + str(k)
+    return policy_file_tag
+def write_to_file(metric, policy, load, distribution, results, cluster_id=None):
+    if cluster_id != None:
+        filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' +metric +  '_' + str(load) +  '_c' + str(cluster_id) + '.csv'
+    else:
+        filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' +metric +  '_' + str(load) + '.csv'
     np_array = np.array(results)
     with open(result_dir + filename, 'wb') as output_file:
         #writer = csv.writer(output_file, delimiter=',')

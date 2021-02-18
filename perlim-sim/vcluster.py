@@ -1,7 +1,6 @@
 import os
 import random
 import math
-from loguru import logger
 from utils import *
 
 class VirtualCluster:
@@ -11,50 +10,61 @@ class VirtualCluster:
         policy,
         host_list,
         load,
-        target_parition_size=4,
+        target_parition_size=10,
         task_distribution_name='bimodal'):
+
         self.policy = policy
         self.cluster_id = cluster_id
 
         self.tor_spine_map = {}
         self.worker_start_idx = worker_start_idx
-        self.last_task_arrival = 0.0
-        self.task_idx = 0
         
         self.num_workers = len(host_list)
         self.task_distribution = generate_task_dist(self.num_workers, task_distribution_name)
 
         self.task_distribution_name = task_distribution_name
-        self.queue_lens_workers = [0] * self.num_workers
-        self.task_lists = [] * self.num_workers
+
         self.host_list = host_list
         self._get_tor_list_for_hosts(host_list)
         self.tor_id_unique_list = list(set(self.tor_id_list))
 
         self.num_tors = len(self.tor_id_unique_list)
-        self.queue_lens_tors = [0.0] * self.num_tors
+        
         self._get_spine_list_for_tors(target_parition_size, policy)
         self.num_spines = len(self.selected_spine_list)
+        self._set_load(load)
+        self.init_cluster_state()
         
-        self.set_inter_arival(load)
+            # if len(self.idle_queue_spine[random_spine]) <= self.partition_size:
+            #     self.idle_queue_spine[random_spine].append(tor_idx)
+        # print(self.idle_queue_tor)
+        # print(self.idle_queue_spine)
+        # exit(0)
+        # logger.trace(self.idle_queue_tor)
+        # logger.trace(self.selected_spine_list)
+        # logger.trace(self.idle_queue_spine)
+        #exit(0)
 
-        # self.num_msg_spine = [0] * self.num_spines  
-        # self.num_msg_tor = [0] * self.num_tors
-        # self.switch_state_spine = [] * self.num_spines 
-        # self.switch_state_tor = [] * self.num_tors
+    def init_cluster_state(self):
+        self.queue_lens_tors = [0.0] * self.num_tors
+        self.last_task_arrival = 0.0
+        self.task_idx = 0
 
+        self.queue_lens_workers = [0] * self.num_workers
+        self.task_lists = [] * self.num_workers
         self.idle_queue_tor = [] * self.num_tors
         self.idle_queue_spine = [] * self.num_spines
 
         self.known_queue_len_spine = [] * self.num_spines  # For each spine, list of maps between torID and average queueLen if ToR
         self.known_queue_len_tor = [] * self.num_tors # For each tor, list of maps between workerID and queueLen
         
-        # self.log_queue_len_signal_tors = []  # For analysis only 
-        # self.log_queue_len_signal_workers = [] 
-        # self.log_task_wait_time = []
-        # self.log_task_transfer_time = []
-        # self.log_decision_type = [] 
-        # self.log_known_queue_len_spine = []
+        self.log_queue_len_signal_tors = []  # For analysis only 
+        self.log_queue_len_signal_workers = [] 
+        self.log_task_wait_time = []
+        self.log_task_transfer_time = []
+        self.log_decision_type = [] 
+        self.log_known_queue_len_spine = []
+        self.idle_counts = []
 
         for i in range(self.num_workers):
             self.task_lists.append([])
@@ -62,27 +72,30 @@ class VirtualCluster:
         for tor_idx in range(self.num_tors):
             self.idle_queue_tor.append([])
             for worker_idx in range(self.num_workers):
-                if host_list[worker_idx] in get_host_range_for_tor(self.tor_id_unique_list[tor_idx]):
+                if self.host_list[worker_idx] in get_host_range_for_tor(self.tor_id_unique_list[tor_idx]):
                     self.idle_queue_tor[tor_idx].append(worker_idx)
             self.known_queue_len_tor.append({})
 
         for spine_idx in range(self.num_spines):
             self.idle_queue_spine.append([])
-            # Initialization: Tors physicall connected to seleceted pods are added to spine idle list
-            spine_pod_idx = int(self.selected_spine_list[spine_idx] / spines_per_pod)
-            for tor_idx in range(self.num_tors):
-                tor_pod_idx = int(self.tor_id_unique_list[tor_idx] / tors_per_pod)
-                if tor_pod_idx == spine_pod_idx:
-                    self.idle_queue_spine[spine_idx].append(tor_idx)
-                    continue
+            # # Initialization: Tors physicall connected to seleceted pods are added to spine idle list
+            # spine_pod_idx = int(self.selected_spine_list[spine_idx] / spines_per_pod)
+            # for tor_idx in range(self.num_tors):
+            #     tor_pod_idx = int(self.tor_id_unique_list[tor_idx] / tors_per_pod)
+            #     if tor_pod_idx == spine_pod_idx:
+            #         self.idle_queue_spine[spine_idx].append(tor_idx)
+            #         continue
             self.known_queue_len_spine.append({})
-        
-        # logger.trace(self.idle_queue_tor)
-        # logger.trace(self.selected_spine_list)
-        # logger.trace(self.idle_queue_spine)
-        #exit(0)
 
-    def set_inter_arival(self, load):
+        for tor_idx in range(self.num_tors):
+            random_spine = random.choice(range(len(self.selected_spine_list)))
+            for spine_idx, spine_id in enumerate(self.selected_spine_list):
+                if len(self.idle_queue_spine[spine_idx]) <= self.partition_size:
+                    self.idle_queue_spine[spine_idx].append(tor_idx)
+                    break
+
+    def _set_load(self, load):
+        self.load = load
         if self.task_distribution_name == "bimodal":
             mean_task_time = (mean_task_small + mean_task_medium) / 2
         elif self.task_distribution_name == "trimodal":
@@ -127,9 +140,6 @@ class VirtualCluster:
                 random_spine = random.choice(available_spine_list)
                 available_spine_list.remove(random_spine)
                 selected_spine_list.append(random_spine)
-            
-            
-            
 
         elif policy == 'pow_of_k_partitioned':
             self.spine_tor_map = {}
@@ -140,18 +150,18 @@ class VirtualCluster:
                     pod_tors.update({pod_idx : [tor_idx]})
                 else:
                     pod_tors.update({pod_idx : pod_tors[pod_idx] + [tor_idx]})
-            logger.trace(self.host_list)
-            logger.trace(self.tor_id_unique_list)
-            logger.trace(self.tor_id_list)
-            logger.trace(pod_tors)
-            logger.trace(len(pod_tors))
+            # logger.trace(self.host_list)
+            # logger.trace(self.tor_id_unique_list)
+            # logger.trace(self.tor_id_list)
+            # logger.trace(pod_tors)
+            # logger.trace(len(pod_tors))
             
             for pod_idx in pod_tors:
                 num_spines_to_select = math.ceil(len(pod_tors[pod_idx]) / target_parition_size)
-                logger.trace(num_spines_to_select)
+                #logger.trace(num_spines_to_select)
                 connected_spine_list = list(range(pod_idx*spines_per_pod, pod_idx*spines_per_pod + spines_per_pod))
                 selected_spine_ids = random.sample(connected_spine_list, num_spines_to_select)
-                logger.trace(len(selected_spine_ids))
+                #logger.trace(len(selected_spine_ids))
                 
                 for spine_id in selected_spine_ids:
                     mapped_tors = []
@@ -170,9 +180,9 @@ class VirtualCluster:
                     
                     selected_spine_list.append(spine_id)
             
-            logger.trace(selected_spine_list)
-            logger.trace(self.spine_tor_map)
-            logger.trace(self.tor_spine_map)
+            # logger.trace(selected_spine_list)
+            # logger.trace(self.spine_tor_map)
+            # logger.trace(self.tor_spine_map)
         else:
             for tor_idx in self.tor_id_unique_list:
                 connected_spine_list = list(get_spine_range_for_tor(tor_idx))
@@ -181,4 +191,10 @@ class VirtualCluster:
 
         self.partition_size = self.num_tors / len(selected_spine_list)
         self.selected_spine_list = selected_spine_list
+        
+        # print(self.tor_id_unique_list)
+        # print(self.selected_spine_list)
+        # print(self.spine_tor_map)
+        
+        # print(self.partition_size)
 
