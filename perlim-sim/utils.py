@@ -9,10 +9,8 @@ import ast
 from tenants import Tenants
 from placement import Placement
 
-result_dir = "./results_correct_l10/"
-
 num_tenants = 3000
-min_workers= 10
+min_workers = 10
 max_workers = 2000
 max_workers_per_host = 16
 
@@ -29,8 +27,8 @@ cross_pod_assignment = True
 
 #loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6,0.7, 0.8, 0.85, 0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
 #loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99]
-loads = [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]
-#loads = [0.99]
+loads = [0.3, 0.5, 0.7, 0.9, 0.99]
+#loads = [0.5]
 
 task_time_distributions = ['bimodal']
 
@@ -56,8 +54,8 @@ LINK_DELAY_CORE = range(20 , 40)
 
 NUM_TASK_PER_WORKER = 20
 
-def read_dataset():
-    filename = result_dir + 'summary_system.log'
+def read_dataset(working_dir):
+    filename = working_dir + 'summary_system.log'
     fp = open(filename)
     lines = fp.readlines()
     data = ast.literal_eval(lines[3])
@@ -179,13 +177,13 @@ def get_policy_file_tag(policy, k):
     elif policy == 'adaptive':
         policy_file_tag = 'adaptive_k' + str(k)
     return policy_file_tag
-def write_to_file(metric, policy, load, distribution, results, cluster_id=None):
+def write_to_file(working_dir, metric, policy, load, distribution, results, run_id, cluster_id=None):
     if cluster_id != None:
-        filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' +metric +  '_' + str(load) +  '_c' + str(cluster_id) + '.csv'
+        filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' + metric +  '_' + str(load) +  '_c' + str(cluster_id) + '_r' + run_id + '.csv'
     else:
-        filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' +metric +  '_' + str(load) + '.csv'
+        filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' +metric +  '_' + str(load) + '_r' + run_id + '.csv'
     np_array = np.array(results)
-    with open(result_dir + filename, 'wb') as output_file:
+    with open(working_dir + filename, 'wb') as output_file:
         #writer = csv.writer(output_file, delimiter=',')
         #writer.writerow(np_array)
         np.savetxt(output_file, [np_array], delimiter=', ', fmt='%.2f')

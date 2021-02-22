@@ -1,5 +1,20 @@
+"""Usage:
+multi_layer_lb.py [-d <working_dir>]
+
+multi_layer_lb.py -h | --help
+multi_layer_lb.py -v | --version
+
+Arguments:
+  -d <working_dir> Directory to save dataset "system_summary.log"
+  
+Options:
+  -h --help  Displays this message
+  -v --version  Displays script version
+"""
+
 import os
 import random
+import docopt
 
 from loguru import logger
 from utils import *
@@ -13,7 +28,10 @@ def generate_worker_data():
     return data
 
 if __name__ == "__main__":
-    logger.add(result_dir + 'summary_system.log', filter=lambda record: record["extra"]["task"] == 'system', level="INFO")
+    arguments = docopt.docopt(__doc__, version='1.0')
+    working_dir = arguments.get('-d', './')
+    
+    logger.add(working_dir + 'summary_system.log', filter=lambda record: record["extra"]["task"] == 'system', level="INFO")
     log_handler_system = logger.bind(task='system')
 
     log_handler_system.info("\nNumber of hosts: " + str(num_hosts))

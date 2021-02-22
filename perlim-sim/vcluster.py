@@ -10,7 +10,7 @@ class VirtualCluster:
         policy,
         host_list,
         load,
-        target_parition_size=10,
+        target_partition_size=10,
         task_distribution_name='bimodal'):
 
         self.policy = policy
@@ -30,19 +30,17 @@ class VirtualCluster:
 
         self.num_tors = len(self.tor_id_unique_list)
         
-        self._get_spine_list_for_tors(target_parition_size, policy)
+        self._get_spine_list_for_tors(target_partition_size, policy)
         self.num_spines = len(self.selected_spine_list)
         self._set_load(load)
         self.init_cluster_state()
-        
-            # if len(self.idle_queue_spine[random_spine]) <= self.partition_size:
-            #     self.idle_queue_spine[random_spine].append(tor_idx)
+          
+        # print(len(self.tor_id_unique_list))
+        # print(len(self.selected_spine_list))
         # print(self.idle_queue_tor)
+        # print(self.selected_spine_list)
         # print(self.idle_queue_spine)
-        # exit(0)
-        # logger.trace(self.idle_queue_tor)
-        # logger.trace(self.selected_spine_list)
-        # logger.trace(self.idle_queue_spine)
+        # print('\n\n\n')
         #exit(0)
 
     def init_cluster_state(self):
@@ -111,7 +109,7 @@ class VirtualCluster:
 
     # TODO @parham: Implement spine selection algorithm here.
     # For now it randomly selects spines to be in the scheduling path with fixed L value
-    def _get_spine_list_for_tors(self, target_parition_size, policy):
+    def _get_spine_list_for_tors(self, target_partition_size, policy):
         available_spine_list = []
         selected_spine_list = []
         pod_list = []
@@ -134,7 +132,7 @@ class VirtualCluster:
             for spine_idx in selected_spine_list:
                 available_spine_list.remove(spine_idx)
 
-            target_num_spines =  self.num_tors / target_parition_size
+            target_num_spines =  self.num_tors / target_partition_size
             # Randomly add more spines until condition satisfied
             while (len(selected_spine_list) < target_num_spines) and (len(available_spine_list) > 1):
                 random_spine = random.choice(available_spine_list)
@@ -157,7 +155,7 @@ class VirtualCluster:
             # logger.trace(len(pod_tors))
             
             for pod_idx in pod_tors:
-                num_spines_to_select = math.ceil(len(pod_tors[pod_idx]) / target_parition_size)
+                num_spines_to_select = math.ceil(len(pod_tors[pod_idx]) / target_partition_size)
                 #logger.trace(num_spines_to_select)
                 connected_spine_list = list(range(pod_idx*spines_per_pod, pod_idx*spines_per_pod + spines_per_pod))
                 selected_spine_ids = random.sample(connected_spine_list, num_spines_to_select)
@@ -165,7 +163,7 @@ class VirtualCluster:
                 
                 for spine_id in selected_spine_ids:
                     mapped_tors = []
-                    for x in range(target_parition_size):
+                    for x in range(target_partition_size):
                         if pod_tors[pod_idx]:
                             mapped_tor = pod_tors[pod_idx].pop(0)
                             mapped_tors.append(mapped_tor)
