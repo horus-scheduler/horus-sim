@@ -1,5 +1,5 @@
 """Usage:
-multi_layer_lb.py -d <working_dir> -p <policy> -l <load> -k <k_value> -r <spine_ratio>  -t <task_distribution> -i <id> 
+multi_layer_lb.py -d <working_dir> -p <policy> -l <load> -k <k_value> -r <spine_ratio>  -t <task_distribution> -i <id> [--colocate]
 
 multi_layer_lb.py -h | --help
 multi_layer_lb.py -v | --version
@@ -27,23 +27,25 @@ import time
 from multiprocessing import Process, Queue, Value, Array
 from loguru import logger
 import docopt
+import shutil
 
 from utils import *
 from vcluster import VirtualCluster
 from task import Task
 
-LOG_PROGRESS_INTERVAL = 420 # Dump some progress info periodically (in seconds)
+FWD_TIME_TICKS = 1 # Number of 0.1us ticks to pass in sim steps...
+LOG_PROGRESS_INTERVAL = 600 # Dump some progress info periodically (in seconds)
 result_dir = "./"
 
-def report_cluster_results(log_handler, policy_file_tag, sys_load, vcluster, run_id):
+def report_cluster_results(log_handler, policy_file_tag, sys_load, vcluster, run_id, is_colocate=False):
     log_handler.info(policy_file_tag + ' Finished cluster with ID:' + str(vcluster.cluster_id) +' wait_times @' + str(sys_load) + ':\n' +  str(pd.Series(vcluster.log_task_wait_time).describe()))
     log_handler.info(policy_file_tag + ' Finished cluster with ID:' + str(vcluster.cluster_id) + ' transfer_times @' + str(sys_load) + ':\n' +  str(pd.Series(vcluster.log_task_transfer_time).describe()))
-    write_to_file(result_dir, 'wait_times', policy_file_tag, sys_load, vcluster.task_distribution_name,  vcluster.log_task_wait_time, run_id, cluster_id=vcluster.cluster_id)
-    write_to_file(result_dir, 'transfer_times', policy_file_tag, sys_load, vcluster.task_distribution_name, vcluster.log_task_transfer_time, run_id, cluster_id=vcluster.cluster_id)
-    write_to_file(result_dir, 'idle_count', policy_file_tag, sys_load, vcluster.task_distribution_name, vcluster.idle_counts, run_id, cluster_id=vcluster.cluster_id)
-    write_to_file(result_dir, 'queue_lens', policy_file_tag, sys_load, vcluster.task_distribution_name,  vcluster.log_queue_len_signal_workers, run_id, cluster_id=vcluster.cluster_id)
+    write_to_file(result_dir, 'wait_times', policy_file_tag, sys_load, vcluster.task_distribution_name,  vcluster.log_task_wait_time, run_id, cluster_id=vcluster.cluster_id, is_colocate=is_colocate)
+    write_to_file(result_dir, 'transfer_times', policy_file_tag, sys_load, vcluster.task_distribution_name, vcluster.log_task_transfer_time, run_id, cluster_id=vcluster.cluster_id, is_colocate=is_colocate)
+    write_to_file(result_dir, 'idle_count', policy_file_tag, sys_load, vcluster.task_distribution_name, vcluster.idle_counts, run_id, cluster_id=vcluster.cluster_id, is_colocate=is_colocate)
+    write_to_file(result_dir, 'queue_lens', policy_file_tag, sys_load, vcluster.task_distribution_name,  vcluster.log_queue_len_signal_workers, run_id, cluster_id=vcluster.cluster_id, is_colocate=is_colocate)
     if vcluster.policy == 'adaptive' or vcluster.policy == 'jiq':
-            write_to_file(result_dir, 'decision_type', policy_file_tag, sys_load, vcluster.task_distribution_name, vcluster.log_decision_type, run_id, cluster_id=vcluster.cluster_id)
+            write_to_file(result_dir, 'decision_type', policy_file_tag, sys_load, vcluster.task_distribution_name, vcluster.log_decision_type, run_id, cluster_id=vcluster.cluster_id, is_colocate=is_colocate)
 
 def calculate_num_state(policy, switch_state_tor, switch_state_spine, vcluster, vcluster_list):
     for spine_id in range(num_spines):
@@ -96,32 +98,25 @@ def process_network(in_transit_tasks, ticks_passed):
 
 def jiq_server_process(vcluster, num_msg_tor, num_msg_spine, k, worker_idx, tor_idx):
     min_idle_queue = float("inf")
-    
-    sample_indices = random.sample(range(0, vcluster.num_spines), min(k, vcluster.num_spines)) # Sample k spines
-    #print sample_indices
-    for idx in sample_indices:  # Find the sampled spine with min idle queue len
-        sampled_value = len(vcluster.idle_queue_spine[idx])
-        sampled_spine_id = vcluster.selected_spine_list[idx]
+    if len(vcluster.idle_queue_tor[tor_idx])==1: # Tor just became aware of idle workers and add itself to a spine
+        sample_indices = random.sample(range(0, vcluster.num_spines), min(k, vcluster.num_spines)) # Sample k spines
+        #print sample_indices
+        for idx in sample_indices:  # Find the sampled spine with min idle queue len
+            sampled_value = len(vcluster.idle_queue_spine[idx])
+            sampled_spine_id = vcluster.selected_spine_list[idx]
 
-        num_msg_spine[sampled_spine_id] += 1   # total k msgs for sampling spine idle queues
-        if sampled_value < min_idle_queue:
-            min_idle_queue = sampled_value
-            target_spine_idx = idx
-
-    vcluster.idle_queue_tor[tor_idx].append(worker_idx) # Add idle worker to idle queue of ToR
-    tor_id = vcluster.tor_id_unique_list[tor_idx]
-
-    num_msg_tor[tor_id] += 1    #1 msg for updating tor idle queue
-    
-    already_paired = False
-    for spine_idx in range(vcluster.num_spines):
-        if tor_idx in vcluster.idle_queue_spine[spine_idx]:
-            already_paired = True
-
-    if not already_paired:
+            num_msg_spine[sampled_spine_id] += 1   # total k msgs for sampling spine idle queues
+            if sampled_value < min_idle_queue:
+                min_idle_queue = sampled_value
+                target_spine_idx = idx
         vcluster.idle_queue_spine[target_spine_idx].append(tor_idx) # Add ToR to the idle queue of selected spine
         target_spine_id = vcluster.selected_spine_list[target_spine_idx]
         num_msg_spine[target_spine_id] += 1 # 1 msg for updating spine idle queue
+    
+    vcluster.idle_queue_tor[tor_idx].append(worker_idx) # Add idle worker to idle queue of ToR
+    tor_id = vcluster.tor_id_unique_list[tor_idx]
+    num_msg_tor[tor_id] += 1    #1 msg for updating tor idle queue
+    
     return vcluster, num_msg_tor, num_msg_spine
 
 def adaptive_server_process(vcluster, num_msg_tor, num_msg_spine, k, worker_idx, tor_idx):
@@ -383,7 +378,8 @@ def schedule_task_adaptive(new_task, k, num_msg_tor, num_msg_spine):
     else:   # No tor with idle server is known
         sq_update = False
         if (len(new_task.vcluster.known_queue_len_spine[target_spine]) < partition_size_spine): # Scheduer still trying to get more queue len info
-            probe_tors = random.sample(range(new_task.vcluster.num_tors), k)
+            num_samples = min(k, new_task.vcluster.num_tors)
+            probe_tors = random.sample(range(new_task.vcluster.num_tors), num_samples)
 
             for random_tor in probe_tors:
                 already_paired = False
@@ -421,7 +417,6 @@ def schedule_task_adaptive(new_task, k, num_msg_tor, num_msg_spine):
             #     new_task.vcluster.known_queue_len_spine[target_spine].update({target_tor: new_task.vcluster.queue_lens_tors[target_tor]}) # Add SQ signal
             #     num_msg_spine[target_spine_id] += 1 # Reply from tor to add SQ signal
             new_task.decision_tag = 2 # Random-based decision
-        
             
             # if new_task.vcluster.known_queue_len_tor[target_tor]: # Any SQ signal available to ToR at the time
             #     sum_known_signals = 0
@@ -431,9 +426,7 @@ def schedule_task_adaptive(new_task, k, num_msg_tor, num_msg_spine):
                 
             #     new_task.vcluster.known_queue_len_spine[target_spine].update({random_tor: avg_known_queue_len}) # Add SQ signal
             num_msg_spine[target_spine_id] += 1 # msg from tor to add SQ signal
-
-                
-    # Make decision at ToR layer:
+ 
     # if len(new_task.vcluster.idle_queue_tor[target_tor]) <= 1:
     #     if new_task.decision_tag ==0:
     #         new_task.vcluster.idle_queue_spine[target_spine].pop(0)
@@ -520,7 +513,7 @@ def update_switch_views(scheduled_task, num_msg_spine):
         
     return num_msg_spine
 
-def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_ratio, run_id):
+def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_ratio, run_id, is_colocate):
     nr.seed()
     random.seed()
     start_time = time.time()
@@ -530,10 +523,10 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
     logger_tag_clusters = "summary_clusters_" + policy_file_tag + '_' + str(sys_load) + '_r' + str(run_id) + ".log"
     logger_tag_dcn = "summary_dcn_" + policy_file_tag + '_' + str(sys_load) + '_r' + str(run_id) + ".log"
 
-    logger.add(result_dir + logger_tag_clusters, filter=lambda record: record["extra"]["task"] == logger_tag_clusters)
+    logger.add(sys.stdout, filter=lambda record: record["extra"]["task"] == logger_tag_clusters)
     log_handler_experiment = logger.bind(task=logger_tag_clusters)
 
-    logger.add(result_dir + logger_tag_dcn, filter=lambda record: record["extra"]["task"] == logger_tag_dcn, level="INFO")
+    logger.add(sys.stdout, filter=lambda record: record["extra"]["task"] == logger_tag_dcn, level="INFO")
     log_handler_dcn = logger.bind(task=logger_tag_dcn)
 
     cluster_terminate_count = 0
@@ -568,6 +561,8 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
 
     num_msg_spine = [0] * num_spines  
     num_msg_tor = [0] * num_tors
+    num_task_spine = [0] * num_spines  
+    num_task_tor = [0] * num_tors
     switch_state_spine = [] * num_spines 
     switch_state_tor = [] * num_tors
 
@@ -594,12 +589,12 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
         for vcluster in vcluster_list:  
             num_msg_tor, num_msg_spine = process_tasks_fcfs(
                     vcluster=vcluster,
-                    ticks_passed=1,
+                    ticks_passed=FWD_TIME_TICKS,
                     num_msg_tor=num_msg_tor,
                     num_msg_spine=num_msg_spine,
                     k=k)
 
-        in_transit_tasks, arrived_tasks = process_network(in_transit_tasks, ticks_passed=1)
+        in_transit_tasks, arrived_tasks = process_network(in_transit_tasks, ticks_passed=FWD_TIME_TICKS)
 
         for arrived_task in arrived_tasks:
             #print arrived_task.target_worker
@@ -624,7 +619,7 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
                 vcluster.idle_counts.append(num_idles)
                 
                 load = vcluster.task_distribution[vcluster.task_idx] # Pick new task load
-                new_task = Task(load, vcluster) 
+                new_task = Task(load, vcluster)
                 
                 if policy == 'random':
                     scheduled_task = schedule_task_random(new_task)
@@ -676,17 +671,25 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
 
                     # print("Decision: " + str(scheduled_task.decision_tag) + ", Spine: " + str(scheduled_task.first_spine) + ", Tor: " + str(scheduled_task.target_tor) + ", Worker: " + str(scheduled_task.target_worker))
                     # print('\n')
+                
+                if (scheduled_task.global_spine_id >= len(num_task_spine)):
+                    print (len(num_task_spine))
+                    print (scheduled_task.global_spine_id)
+                    print(vcluster.cluster_id)
+                    exit(0)
+                num_task_spine[scheduled_task.global_spine_id] += 1
+                num_task_tor[scheduled_task.global_tor_id] += 1
+
                 num_msg_spine = update_switch_views(scheduled_task, num_msg_spine)
                 in_transit_tasks.append(scheduled_task)
                 vcluster.task_idx += 1
                 if (vcluster.task_idx == len(vcluster.task_distribution) - 1):
                     cluster_terminate_count += 1
-                    report_cluster_results(log_handler_experiment, policy_file_tag, sys_load, vcluster, run_id)
-
-        tick += 1
+                    report_cluster_results(log_handler_experiment, policy_file_tag, sys_load, vcluster, run_id, is_colocate)                   
+        tick += FWD_TIME_TICKS
  
         #  Take samples to capture fluctuations
-        if (tick%(int(mean_task_small)) == 0):
+        if (tick%(int(mean_task_small/2)) == 0):
             switch_state_tor, switch_state_spine = calculate_num_state(
                             policy,
                             switch_state_tor,
@@ -698,12 +701,17 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
         
         if elapsed_time > LOG_PROGRESS_INTERVAL:
             log_handler_dcn.debug(policy_file_tag + ' progress log @' + str(sys_load) + ' Ticks passed: ' + str(tick) + ' Clusters done: ' + str(cluster_terminate_count))
-            
             exp_duration_s = float(tick) / (10**7)
             max_state_spine = [max(x, default=0) for x in switch_state_spine]
             max_state_tor = [max(x, default=0) for x in switch_state_tor]
             msg_per_sec_spine = [x / exp_duration_s for x in num_msg_spine]
             msg_per_sec_tor = [x / exp_duration_s for x in num_msg_tor]
+            task_per_sec_tor = [x / exp_duration_s for x in num_task_tor]
+            task_per_sec_spine = [x / exp_duration_s for x in num_task_spine]
+
+            log_handler_dcn.info(policy_file_tag + ' task_per_sec_spine @' + str(sys_load) + ':\n' +  str(pd.Series(task_per_sec_spine).describe()))
+            log_handler_dcn.info(policy_file_tag + ' task_per_sec_tor @' + str(sys_load) + ':\n' +  str(pd.Series(task_per_sec_tor).describe()))
+
             log_handler_dcn.info(policy_file_tag + ' switch_state_spine_max @' + str(sys_load) + ':\n' +  str(pd.Series(max_state_spine).describe()))
             log_handler_dcn.info(policy_file_tag + ' switch_state_tor_max @' + str(sys_load) + ':\n' +  str(pd.Series(max_state_tor).describe()))
             log_handler_dcn.info(policy_file_tag + ' msg_per_sec_spine @' + str(sys_load) + ':\n' +  str(pd.Series(msg_per_sec_spine).describe()))
@@ -719,17 +727,23 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
     mean_state_spine = [np.nanmean(x) for x in switch_state_spine if x]
     max_state_tor = [max(x, default=0) for x in switch_state_tor]
     mean_state_tor = [np.nanmean(x) for x in switch_state_tor if x]
+    task_per_sec_tor = [x / exp_duration_s for x in num_task_tor]
+    task_per_sec_spine = [x / exp_duration_s for x in num_task_spine]
+    
+    write_to_file(result_dir, 'task_per_sec_tor', policy_file_tag, sys_load, task_distribution_name, task_per_sec_tor, run_id, is_colocate=is_colocate)
+    write_to_file(result_dir, 'task_per_sec_spine', policy_file_tag, sys_load, task_distribution_name, task_per_sec_spine, run_id, is_colocate=is_colocate)
     
     if policy != 'random':
-        write_to_file(result_dir, 'switch_state_spine_mean', policy_file_tag, sys_load, task_distribution_name,  mean_state_spine, run_id)
-        write_to_file(result_dir, 'switch_state_tor_mean', policy_file_tag, sys_load, task_distribution_name,  mean_state_tor, run_id)
-        write_to_file(result_dir, 'switch_state_spine_max', policy_file_tag, sys_load, task_distribution_name,  max_state_spine, run_id)
-        write_to_file(result_dir, 'switch_state_tor_max', policy_file_tag, sys_load, task_distribution_name,  max_state_tor, run_id)
-        write_to_file(result_dir, 'msg_per_sec_tor', policy_file_tag, sys_load, task_distribution_name, msg_per_sec_tor, run_id)
-        write_to_file(result_dir, 'msg_per_sec_spine', policy_file_tag, sys_load, task_distribution_name, msg_per_sec_spine, run_id)
+        write_to_file(result_dir, 'switch_state_spine_mean', policy_file_tag, sys_load, task_distribution_name,  mean_state_spine, run_id, is_colocate=is_colocate)
+        write_to_file(result_dir, 'switch_state_tor_mean', policy_file_tag, sys_load, task_distribution_name,  mean_state_tor, run_id, is_colocate=is_colocate)
+        write_to_file(result_dir, 'switch_state_spine_max', policy_file_tag, sys_load, task_distribution_name,  max_state_spine, run_id, is_colocate=is_colocate)
+        write_to_file(result_dir, 'switch_state_tor_max', policy_file_tag, sys_load, task_distribution_name,  max_state_tor, run_id, is_colocate=is_colocate)
+        write_to_file(result_dir, 'msg_per_sec_tor', policy_file_tag, sys_load, task_distribution_name, msg_per_sec_tor, run_id, is_colocate=is_colocate)
+        write_to_file(result_dir, 'msg_per_sec_spine', policy_file_tag, sys_load, task_distribution_name, msg_per_sec_spine, run_id, is_colocate=is_colocate)
     
 def run_multiple_simulations(data):
     proc_list = []
+    loads = [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]
     for task_distribution_name in task_time_distributions:
         print (task_distribution_name + " task distribution\n")
         for load in loads:
@@ -764,7 +778,10 @@ if __name__ == "__main__":
     spine_ratio = int(arguments['-r'])
     run_id = arguments['-i']
     task_distribution_name = arguments['-t']
+    
+    is_colocate = arguments.get('--colocate', False)
+
     print (policy)
-    data = read_dataset(working_dir)
-    run_scheduling(policy, data, k_value, task_distribution_name, load, spine_ratio, run_id)
+    data = read_dataset(working_dir, is_colocate)
+    run_scheduling(policy, data, k_value, task_distribution_name, load, spine_ratio, run_id, is_colocate)
 

@@ -98,8 +98,11 @@ class VirtualCluster:
             mean_task_time = (mean_task_small + mean_task_medium) / 2
         elif self.task_distribution_name == "trimodal":
             mean_task_time = (mean_task_small + mean_task_medium + mean_task_large) / 3
-        self.inter_arrival = (mean_task_time / self.num_workers) / load
-
+        elif self.task_distribution_name == "exponential":
+            mean_task_time = mean_exp_task
+            
+        self.inter_arrival = (mean_task_time / self.num_workers) / load    
+        
     def _get_tor_list_for_hosts(self, host_list):
         tor_list = []
         for host_id in host_list:
@@ -186,6 +189,31 @@ class VirtualCluster:
                 connected_spine_list = list(get_spine_range_for_tor(tor_idx))
                 selected_spine_list += connected_spine_list
             selected_spine_list = list(set(selected_spine_list))
+            
+            # ## TODO: Limit number of Spine schedulers (same as adaptive or other policies). Uncomment below:
+            # for tor_idx in self.tor_id_unique_list:
+            #     pod_idx = int(tor_idx / tors_per_pod)
+            #     # First make sure we add 1 spine for each pod to scheduling path
+            #     connected_spine_list = list(get_spine_range_for_tor(tor_idx))
+            #     if pod_idx not in pod_list:
+            #         pod_list.append(pod_idx)
+            #         random_spine = random.choice(connected_spine_list)
+            #         selected_spine_list.append(random_spine)
+
+            #     available_spine_list += connected_spine_list
+            
+            # # Remove duplicates
+            # available_spine_list = list(set(available_spine_list))
+            # # Remove already selected spines
+            # for spine_idx in selected_spine_list:
+            #     available_spine_list.remove(spine_idx)
+
+            # target_num_spines =  self.num_tors / target_partition_size
+            # # Randomly add more spines until condition satisfied
+            # while (len(selected_spine_list) < target_num_spines) and (len(available_spine_list) > 1):
+            #     random_spine = random.choice(available_spine_list)
+            #     available_spine_list.remove(random_spine)
+            #     selected_spine_list.append(random_spine)
 
         self.partition_size = self.num_tors / len(selected_spine_list)
         self.selected_spine_list = selected_spine_list

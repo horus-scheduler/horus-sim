@@ -90,7 +90,7 @@ class Placement:
             available_hosts_per_leaf = available_hosts_per_leaf_per_pod[p]
             available_hosts_count_per_leaf = available_hosts_count_per_leaf_per_pod[p]
             for l in range(self.num_leafs_per_pod):
-                available_hosts_per_leaf[l] = [(available_leafs[l] * self.num_hosts_per_leaf) + h + 1
+                available_hosts_per_leaf[l] = [(available_leafs[l] * self.num_hosts_per_leaf) + h 
                                                for h in range(self.num_hosts_per_leaf)]
                 # print('>>', available_hosts_per_leaf[l])
                 available_hosts_count_per_leaf[l] = [

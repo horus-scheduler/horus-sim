@@ -12,7 +12,7 @@ from placement import Placement
 num_tenants = 3000
 min_workers = 10
 max_workers = 2000
-max_workers_per_host = 16
+max_workers_per_host = 32
 
 num_pods = 48
 num_spines = int(num_pods * num_pods / 2)
@@ -20,6 +20,7 @@ num_tors = int(num_pods * num_pods / 2)
 
 spines_per_pod = int(num_spines / num_pods)
 tors_per_pod = int(num_tors / num_pods)
+
 hosts_per_tor = 24
 num_hosts = tors_per_pod * num_pods * hosts_per_tor
 
@@ -27,13 +28,14 @@ cross_pod_assignment = True
 
 #loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6,0.7, 0.8, 0.85, 0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
 #loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.99]
-loads = [0.3, 0.5, 0.7, 0.9, 0.99]
 #loads = [0.5]
 
 task_time_distributions = ['bimodal']
 
 #num_tasks = 6000
 #num_ticks = 500000000
+
+mean_exp_task = 1000.0
 
 # Each tick is 0.1us so task load values are in 0.1us
 mean_task_small = 500.0
@@ -44,9 +46,9 @@ mu = 0.0
 sigma = 1.0
 
 #Assuming each tick is 0.1 us
-LINK_DELAY_TOR = range(40, 100)
-LINK_DELAY_SPINE = range(30, 60) 
-LINK_DELAY_CORE = range(20 , 40)
+LINK_DELAY_TOR = range(65, 130)
+LINK_DELAY_SPINE = range(50, 100) 
+LINK_DELAY_CORE = range(50 , 100)
 
 # LINK_DELAY_TOR = range(0, 1)
 # LINK_DELAY_SPINE = range(0, 1) 
@@ -54,9 +56,13 @@ LINK_DELAY_CORE = range(20 , 40)
 
 NUM_TASK_PER_WORKER = 20
 
-def read_dataset(working_dir):
-    filename = working_dir + 'summary_system.log'
-    fp = open(filename)
+def read_dataset(working_dir, is_colocate=False):
+    if is_colocate:
+        file_path = working_dir + 'summary_system_col.log'
+    else:
+        file_path = working_dir + 'summary_system.log'
+
+    fp = open(file_path)
     lines = fp.readlines()
     data = ast.literal_eval(lines[3])
     return dict(data)
@@ -86,11 +92,15 @@ def generate_task_dist(num_workers, distribution_name=None):
 
     indices = np.arange(load_trimodal.shape[0])
     np.random.shuffle(indices)
+
     load_trimodal = load_trimodal[indices]
     if distribution_name == 'bimodal':
         return load_bimodal
     elif distribution_name == 'trimodal':
-        return log_trimodal
+        return load_trimodal
+    elif distribution_name == 'exponential':
+        load_exponential = np.round(np.random.exponential(mean_exp_task, num_tasks), 5)
+        return load_exponential
 
 def get_tor_id_for_host(host_id):
     return int(host_id / hosts_per_tor)
@@ -165,6 +175,7 @@ def calculate_idle_count(queue_lens_workers):
         if queue_len ==0:
             num_idles += 1
     return num_idles
+
 def get_policy_file_tag(policy, k):
     if policy == 'random':
         policy_file_tag = policy
@@ -177,11 +188,17 @@ def get_policy_file_tag(policy, k):
     elif policy == 'adaptive':
         policy_file_tag = 'adaptive_k' + str(k)
     return policy_file_tag
-def write_to_file(working_dir, metric, policy, load, distribution, results, run_id, cluster_id=None):
-    if cluster_id != None:
-        filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' + metric +  '_' + str(load) +  '_c' + str(cluster_id) + '_r' + run_id + '.csv'
+
+def write_to_file(working_dir, metric, policy, load, distribution, results, run_id, cluster_id=None, is_colocate=False):
+    if is_colocate:
+        sys_config_tag = 'col_' + 'n' + str(num_hosts) + '_t' + str(num_tenants)
     else:
-        filename = policy + '_' + distribution + '_' + 'n' + str(num_hosts) + '_t' + str(num_tenants) + '_' +metric +  '_' + str(load) + '_r' + run_id + '.csv'
+        sys_config_tag = 'n' + str(num_hosts) + '_t' + str(num_tenants)
+
+    if cluster_id != None:
+        filename = policy + '_' + distribution + '_' + sys_config_tag + '_' + metric +  '_' + str(load) +  '_c' + str(cluster_id) + '_r' + run_id + '.csv'
+    else:
+        filename = policy + '_' + distribution + '_' + sys_config_tag + '_' +metric +  '_' + str(load) + '_r' + run_id + '.csv'
     np_array = np.array(results)
     with open(working_dir + filename, 'wb') as output_file:
         #writer = csv.writer(output_file, delimiter=',')
