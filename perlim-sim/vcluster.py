@@ -3,6 +3,11 @@ import random
 import math
 from utils import *
 
+
+WORKER_CLIENT_RATIO = 100
+
+
+
 class VirtualCluster:
     def __init__(self, 
         cluster_id,
@@ -11,8 +16,10 @@ class VirtualCluster:
         host_list,
         load,
         target_partition_size=10,
-        task_distribution_name='bimodal'):
+        task_distribution_name='bimodal',
+        is_single_layer=False):
 
+        self.is_single_layer = is_single_layer
         self.policy = policy
         self.cluster_id = cluster_id
 
@@ -34,19 +41,34 @@ class VirtualCluster:
         self.num_spines = len(self.selected_spine_list)
         self._set_load(load)
         self.init_cluster_state()
-          
-        # print(len(self.tor_id_unique_list))
-        # print(len(self.selected_spine_list))
-        # print(self.idle_queue_tor)
-        # print(self.selected_spine_list)
-        # print(self.idle_queue_spine)
-        # print('\n\n\n')
-        #exit(0)
+
+        self.init_failure_params()
+
+    def set_client_controller_latency(self, index, latency_ticks):
+        if self.max_controller_latency < latency_ticks:
+            self.max_controller_latency = latency_ticks
+        self.client_controller_latency[index] = latency_ticks
+
+    def init_failure_params(self):
+        self.num_clients = max(1, int(self.num_workers / WORKER_CLIENT_RATIO))
+        self.client_pods = [int(random.choice(self.tor_id_unique_list) / tors_per_pod) for i in range(self.num_clients)]
+        self.client_controller_latency = [0] * self.num_clients
+        self.client_notified = [False] * self.num_clients
+        self.client_spine_list = [] * self.num_clients
+        for client_idx in range(self.num_clients):
+            self.client_spine_list.append(self.selected_spine_list.copy())
+
+        self.max_controller_latency = 0
+        self.num_failed_tasks = 0
+        self.num_scheduled_tasks = 0
+        self.failover_converged = False
+        self.failover_converge_latency = 0
 
     def init_cluster_state(self):
         self.queue_lens_tors = [0.0] * self.num_tors
         self.last_task_arrival = 0.0
         self.task_idx = 0
+        self.arrival_delay_exponential = random.expovariate(1.0 / self.inter_arrival)
 
         self.queue_lens_workers = [0] * self.num_workers
         self.task_lists = [] * self.num_workers
@@ -64,16 +86,6 @@ class VirtualCluster:
         self.log_known_queue_len_spine = []
         self.idle_counts = []
 
-        for i in range(self.num_workers):
-            self.task_lists.append([])
-            
-        for tor_idx in range(self.num_tors):
-            self.idle_queue_tor.append([])
-            for worker_idx in range(self.num_workers):
-                if self.host_list[worker_idx] in get_host_range_for_tor(self.tor_id_unique_list[tor_idx]):
-                    self.idle_queue_tor[tor_idx].append(worker_idx)
-            self.known_queue_len_tor.append({})
-
         for spine_idx in range(self.num_spines):
             self.idle_queue_spine.append([])
             # # Initialization: Tors physicall connected to seleceted pods are added to spine idle list
@@ -85,12 +97,28 @@ class VirtualCluster:
             #         continue
             self.known_queue_len_spine.append({})
 
-        for tor_idx in range(self.num_tors):
-            random_spine = random.choice(range(len(self.selected_spine_list)))
-            for spine_idx, spine_id in enumerate(self.selected_spine_list):
-                if len(self.idle_queue_spine[spine_idx]) <= self.partition_size:
-                    self.idle_queue_spine[spine_idx].append(tor_idx)
-                    break
+        for i in range(self.num_workers):
+            self.task_lists.append([])
+
+        if (self.is_single_layer):
+            for spine_idx in range(self.num_spines):
+                for worker_idx in range(self.num_workers):
+                    self.idle_queue_spine[spine_idx].append(worker_idx)
+
+        else:
+            for tor_idx in range(self.num_tors):
+                self.idle_queue_tor.append([])
+                for worker_idx in range(self.num_workers):
+                    if self.host_list[worker_idx] in get_host_range_for_tor(self.tor_id_unique_list[tor_idx]):
+                        self.idle_queue_tor[tor_idx].append(worker_idx)
+                self.known_queue_len_tor.append({})
+
+            for tor_idx in range(self.num_tors):
+                random_spine = random.choice(range(len(self.selected_spine_list)))
+                for spine_idx, spine_id in enumerate(self.selected_spine_list):
+                    if len(self.idle_queue_spine[spine_idx]) <= self.partition_size:
+                        self.idle_queue_spine[spine_idx].append(tor_idx)
+                        break
 
     def _set_load(self, load):
         self.load = load
@@ -116,6 +144,11 @@ class VirtualCluster:
         available_spine_list = []
         selected_spine_list = []
         pod_list = []
+        
+        if self.is_single_layer: # In this case, we simulate a flat, centralized scheduler only single switch will be in charge
+            self.selected_spine_list = [0] 
+            self.partition_size = self.num_workers / len(self.selected_spine_list)
+            return
 
         if policy == 'jiq' or policy == 'adaptive' :
             for tor_idx in self.tor_id_unique_list:
@@ -219,7 +252,8 @@ class VirtualCluster:
         self.selected_spine_list = selected_spine_list
         
         # print(self.tor_id_unique_list)
-        # print(self.selected_spine_list)
+        #print(len(self.selected_spine_list))
+        #print(self.selected_spine_list)
         # print(self.spine_tor_map)
         
         # print(self.partition_size)

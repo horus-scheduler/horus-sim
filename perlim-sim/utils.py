@@ -9,13 +9,16 @@ import ast
 from tenants import Tenants
 from placement import Placement
 
-num_tenants = 3000
-min_workers = 10
+TICKS_PER_MICRO_SEC = 10
+
+num_tenants = 1
+min_workers = 50
 max_workers = 2000
 max_workers_per_host = 32
 
 num_pods = 48
 num_spines = int(num_pods * num_pods / 2)
+
 num_tors = int(num_pods * num_pods / 2)
 
 spines_per_pod = int(num_spines / num_pods)
@@ -109,7 +112,7 @@ def get_host_range_for_tor(tor_idx):
     hosts_start_idx = tor_idx * hosts_per_tor # Each ToR is has access to workers_per_tor machines
     return range(hosts_start_idx, hosts_start_idx + hosts_per_tor)
 
-#Used for partitioned pow-of-k SQ
+#Used for partitioned pow-of-k 
 def get_tor_partition_range_for_spine(spine_idx): 
     partition_size = int(tors_per_pod / spines_per_pod)
     tor_start_idx = spine_idx * partition_size
@@ -144,30 +147,6 @@ def get_worker_indices_for_tor(tor_id, host_list):
             
     return workers_list
 
-def calculate_network_time(first_spine, target_host):
-    # At leaast 2 hop from spine to worker
-    network_time = random.sample(LINK_DELAY_TOR, 1)[0] + random.sample(LINK_DELAY_SPINE, 1)[0] 
-    connected_tors = get_tor_partition_range_for_spine(first_spine)
-    target_tor = get_tor_id_for_host(target_host)
-    
-    # print ("First spine: " + str(first_spine))
-    # print ("Target worker: " + str(target_worker))
-    # print ("Connected tors: " )
-    #print connected_tors
-
-    if target_tor not in connected_tors: # 2x Core-spine delay
-        network_time += random.sample(LINK_DELAY_CORE, 1)[0]
-        network_time += random.sample(LINK_DELAY_CORE, 1)[0]
-    #print ("Network time: " + str(network_time))
-    return network_time
-
-def calculate_num_hops(first_spine, target_host):
-    connected_tors = get_tor_partition_range_for_spine(first_spine)
-    target_tor = get_tor_id_for_host(target_host)
-    num_hops = 2
-    if target_tor not in connected_tors: # 2x Core-spine delay
-        num_hops += 1
-    return num_hops
 
 def calculate_idle_count(queue_lens_workers):
     num_idles = 0
