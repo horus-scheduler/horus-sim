@@ -9,12 +9,12 @@ import ast
 from tenants import Tenants
 from placement import Placement
 
-TICKS_PER_MICRO_SEC = 10
+TICKS_PER_MICRO_SEC = 1000
 
-num_tenants = 1
+num_tenants = 20
 min_workers = 50
 max_workers = 2000
-max_workers_per_host = 32
+max_workers_per_host = 64
 
 num_pods = 48
 num_spines = int(num_pods * num_pods / 2)
@@ -27,6 +27,8 @@ tors_per_pod = int(num_tors / num_pods)
 hosts_per_tor = 24
 num_hosts = tors_per_pod * num_pods * hosts_per_tor
 
+PER_SPINE_CAPACITY = 5e7
+
 cross_pod_assignment = True 
 
 #loads = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6,0.7, 0.8, 0.85, 0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
@@ -38,26 +40,23 @@ task_time_distributions = ['bimodal']
 #num_tasks = 6000
 #num_ticks = 500000000
 
-mean_exp_task = 1000.0
+# Task durations in ns
+mean_exp_task = 100 * TICKS_PER_MICRO_SEC
 
 # Each tick is 0.1us so task load values are in 0.1us
-mean_task_small = 500.0
-mean_task_medium = 5000.0
-mean_task_large = 50000.0
+mean_task_small = 50 * TICKS_PER_MICRO_SEC
+mean_task_medium = 500 * TICKS_PER_MICRO_SEC
+mean_task_large = 5000 * TICKS_PER_MICRO_SEC
 
 mu = 0.0
 sigma = 1.0
 
-#Assuming each tick is 0.1 us
-LINK_DELAY_TOR = range(65, 130)
-LINK_DELAY_SPINE = range(50, 100) 
-LINK_DELAY_CORE = range(50 , 100)
+#Link delays in ns
+LINK_DELAY_TOR = range(6500, 13000)
+LINK_DELAY_SPINE = range(5000, 13000) 
+LINK_DELAY_CORE = range(500, 13000)
 
-# LINK_DELAY_TOR = range(0, 1)
-# LINK_DELAY_SPINE = range(0, 1) 
-# LINK_DELAY_CORE = range(0 , 1)
-
-NUM_TASK_PER_WORKER = 20
+NUM_TASK_PER_WORKER = 50
 
 def read_dataset(working_dir, is_colocate=False):
     if is_colocate:

@@ -55,5 +55,5 @@ class Tenants:
         else:
             raise (Exception("invalid dist parameter for worker allocation"))
 
-        logger.trace(pd.Series([self.tenants_maps[t]['worker_count'] for t in range(self.num_tenants)]).describe())
-        logger.trace("worker Count: %s" % self.tenants['worker_count'])
+        print(pd.Series([self.tenants_maps[t]['worker_count'] for t in range(self.num_tenants)]).describe())
+        print("worker Count: %s" % self.tenants['worker_count'])

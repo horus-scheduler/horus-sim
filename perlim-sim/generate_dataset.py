@@ -1,12 +1,14 @@
 """Usage:
-generate_dataset.py -d <working_dir> [--colocate]
+generate_dataset.py -d <working_dir> -t <num_tenants> --min=<min_workers> --max=<max_workers> [--uniform] [--colocate]
 
 generate_dataset.py -h | --help
 generate_dataset.py -v | --version
 
 Arguments:
   -d <working_dir> Directory to save dataset "system_summary.log"
-  
+  -t <num_tenants>
+  --min=<min_workers>
+  --max=<max_workers>
 Options:
   -h --help  Displays this message
   -v --version  Displays script version
@@ -21,9 +23,13 @@ from utils import *
 
 output_file = 'dataset'
 
-def generate_worker_data(is_colocate):
+def generate_worker_data(num_tenants, min_workers, max_workers, is_uniform, is_colocate):
     data = dict()
-    tenants = Tenants(data, num_tenants=num_tenants, min_workers=min_workers, max_workers=max_workers)
+    if (is_uniform):
+        worker_dist = 'uniform'
+    else:
+        worker_dist = 'expon'
+    tenants = Tenants(data, worker_dist=worker_dist, num_tenants=num_tenants, min_workers=min_workers, max_workers=max_workers)
     if is_colocate:
         placement = Placement(data, num_pods=num_pods, num_leafs_per_pod=tors_per_pod, num_hosts_per_leaf=hosts_per_tor, max_workers_per_host=max_workers_per_host, dist='colocate-colocate-uniform')
     else:
@@ -33,8 +39,13 @@ def generate_worker_data(is_colocate):
 if __name__ == "__main__":
     arguments = docopt.docopt(__doc__, version='1.0')
     working_dir = arguments.get('-d', './')
-    
+    min_workers = int(arguments.get('--min', 10))
+    max_workers = int(arguments.get('--max', 1000))
+    num_tenants = int(arguments.get('-t', 1))
+    print (num_tenants)
     is_colocate = arguments.get('--colocate', False)
+    is_uniform = arguments.get('--uniform', False)
+    print (is_uniform)
     if is_colocate:
         file_path = working_dir + 'summary_system_col.log'
     else:
@@ -44,5 +55,5 @@ if __name__ == "__main__":
     log_handler_system = logger.bind(task='system')
 
     log_handler_system.info("\nNumber of hosts: " + str(num_hosts))
-    data = generate_worker_data(is_colocate)
+    data = generate_worker_data(num_tenants, min_workers, max_workers, is_uniform, is_colocate)
     log_handler_system.info("\n"+str(data))

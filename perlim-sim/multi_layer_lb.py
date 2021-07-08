@@ -1,5 +1,5 @@
 """Usage:
-multi_layer_lb.py -d <working_dir> -p <policy> -l <load> -k <k_value> -r <spine_ratio>  -t <task_distribution> -i <id> -f <failure_mode> [--colocate] 
+multi_layer_lb.py -d <working_dir> -p <policy> -l <load> -k <k_value> -r <spine_ratio>  -t <task_distribution> -i <id> -f <failure_mode> [--fid <failed_switch_id>] [--colocate] 
 
 multi_layer_lb.py -h | --help
 multi_layer_lb.py -v | --version
@@ -13,7 +13,7 @@ Arguments:
   -i <run_id> Run ID used for multiple runs of single dataset
   -t <task_distribution> Distribution name for generated tasks (bimodal|trimodal|exponential)
   -f <failure_mode> Component to fail in the simulations (none|spine|leaf)
-
+  --fid <failed_switch_id>
 Options:
   -h --help  Displays this message
   -v --version  Displays script version
@@ -30,20 +30,23 @@ from multiprocessing import Process, Queue, Value, Array
 from loguru import logger
 import docopt
 import shutil
+import queue
+from heapq import *
+import itertools
 
 from utils import *
-from vcluster import VirtualCluster
+from vcluster import VirtualCluster, Event
 from task import Task
 from latency_model import LatencyModel
+from spine_selector import SpineSelector
 
 FWD_TIME_TICKS = 1 # Number of 0.1us ticks to pass in sim steps...
-LOG_PROGRESS_INTERVAL = 120 # Dump some progress info periodically (in seconds)
+LOG_PROGRESS_INTERVAL = 60 # Dump some progress info periodically (in seconds)
 result_dir = "./"
+FAILURE_TIME_TICK = 100
 
-FAILURE_TIME_TICK = 2 
-
-
-
+counter = itertools.count()     # unique sequence count
+event_queue = []
 
 def report_cluster_results(log_handler, policy_file_tag, sys_load, vcluster, run_id, is_colocate=False):
     log_handler.info(policy_file_tag + ' Finished cluster with ID:' + str(vcluster.cluster_id) +' wait_times @' + str(sys_load) + ':\n' +  str(pd.Series(vcluster.log_task_wait_time).describe()))
@@ -133,10 +136,6 @@ def adaptive_server_process(vcluster, num_msg_tor, num_msg_spine, k, worker_idx,
     # Add idle worker to tor (1 msg) for removing SQ from ToR (and also adds the server to IQ of ToR)
     num_msg_tor[tor_id] += 1 # 
 
-    # TODO @parham: Remove idle worker from list of SQ signals? Uncomment below!
-    if worker_idx in vcluster.known_queue_len_tor[tor_idx]:
-        del vcluster.known_queue_len_tor[tor_idx][worker_idx] # Remove sq entery from tor
-
     if len(vcluster.idle_queue_tor[tor_idx])==1: # Tor just became aware of idle workers and add itself to a spine
         sample_indices = random.sample(range(0, vcluster.num_spines), min(k, vcluster.num_spines)) # Sample k dispatchers
         min_idle_queue = float("inf")
@@ -156,7 +155,6 @@ def adaptive_server_process(vcluster, num_msg_tor, num_msg_spine, k, worker_idx,
     
         # TODO @parham: Another config as discussed in documents is to switch to JIQ and remove all SQs when an idle queue available
         # Uncomment below!
-        vcluster.known_queue_len_tor[tor_idx].clear() # Switched to JIQ
         vcluster.known_queue_len_spine[target_spine_idx].clear() # Switched to JIQ
 
     for spine_idx in range(vcluster.num_spines):
@@ -170,73 +168,62 @@ def adaptive_server_process(vcluster, num_msg_tor, num_msg_spine, k, worker_idx,
     return  vcluster, num_msg_tor, num_msg_spine
 
 def process_tasks_fcfs(
-    vcluster,
-    ticks_passed=1,
+    finished_task,
     num_msg_tor=None,
     num_msg_spine=None,
     k=2
     ):
-    for i in range(len(vcluster.task_lists)):
-        while vcluster.task_lists[i]:    # while there are any tasks in list
-            remaining_time = vcluster.task_lists[i][0] - ticks_passed   # First task in list is being executed
-            vcluster.task_lists[i][0] = max(0, remaining_time) # If remaining time from task is negative another task is could be executed during the interval
-            if vcluster.task_lists[i][0] == 0:   # If finished executing task
-                vcluster.task_lists[i].pop(0)        # Remove from list
-                vcluster.queue_lens_workers[i] -= 1       # Decrement worker queue len
+    
+    i = finished_task.target_worker
+    vcluster = finished_task.vcluster
+    
+    #  finished executing task
+    vcluster.task_lists[i].pop(0)        # Remove from list
+    vcluster.queue_lens_workers[i] -= 1       # Decrement worker queue len
 
-                tor_id = get_tor_id_for_host(vcluster.host_list[i])
-                # Conversion for mapping to cluster's local lists
-                tor_idx = vcluster.tor_id_unique_list.index(tor_id)
+    tor_id = get_tor_id_for_host(vcluster.host_list[i])
+    # Conversion for mapping to cluster's local lists
+    tor_idx = finished_task.target_tor
 
-                vcluster.queue_lens_tors[tor_idx] = calculate_tor_queue_len(tor_id, vcluster.queue_lens_workers, vcluster.host_list)
-
-                # if queue_lens_tors[tor_idx] < 0:
-                #     print ("ERROR")
-                #     print("Tor: " + str(tor_idx) + "worker: " + str(i))
-                if (vcluster.policy == 'pow_of_k') or (vcluster.policy == 'pow_of_k_partitioned'): # Random and JIQ do not use this part
-                    num_msg_tor[tor_id] += 1 # Update worker queuelen at ToR
-                    if vcluster.policy == 'pow_of_k':
-                        # Update ToR queue len at all of the spines
-                        for spine_id in vcluster.selected_spine_list:
-                            num_msg_spine[spine_id] += 1 
-                    else: # Only update the designated spine
-                        mapped_spine_idx = vcluster.tor_spine_map[tor_idx]
-                        mapped_spine_id = vcluster.selected_spine_list[mapped_spine_idx]
-                        num_msg_spine[mapped_spine_id] += 1
-                else: #JIQ and adaptive
-                    if vcluster.policy == 'jiq': # JIQ
-                        if vcluster.queue_lens_workers[i] == 0: # Process for when a server becomes idle 
-                            vcluster, num_msg_tor, num_msg_spine = jiq_server_process(
-                                vcluster, 
-                                num_msg_tor,
-                                num_msg_spine,
-                                k,
-                                i,
-                                tor_idx)
-                    elif vcluster.policy == 'adaptive': # Adaptive
-
-                        if vcluster.queue_lens_workers[i] == 0: # Process for when a server becomes idle 
-                            vcluster, num_msg_tor, num_msg_spine = adaptive_server_process(
-                                vcluster,
-                                num_msg_tor,
-                                num_msg_spine,
-                                k,
-                                i,
-                                tor_idx)
-                        else:
-                            if i in vcluster.known_queue_len_tor[tor_idx]: # Update queue len of worker at ToR
-                                vcluster.known_queue_len_tor[tor_idx].update({i: vcluster.queue_lens_workers[i]})  
-                                tor_id = vcluster.tor_id_unique_list[tor_idx]
-                                num_msg_tor[tor_id] += 1 
-                            for spine_idx in range(vcluster.num_spines): # ToR that is paired with a spine, will update the signal 
-                                if tor_idx in vcluster.known_queue_len_spine[spine_idx]:
-                                    # TODO @parham: Here the ToR should report the *known* queue lens or ToR keeps all of the queue lens
-                                    vcluster.known_queue_len_spine[spine_idx].update({tor_idx: vcluster.queue_lens_tors[tor_idx]}) # Update SQ signals
-                                    spine_id = vcluster.selected_spine_list[spine_idx]
-                                    num_msg_spine[spine_id] += 1
-
-            if remaining_time >= 0:     # Continue loop (processing other tasks) only if remaining time is negative
-                break
+    vcluster.queue_lens_tors[tor_idx] = calculate_tor_queue_len(tor_id, vcluster.queue_lens_workers, vcluster.host_list)
+    if (vcluster.policy == 'pow_of_k') or (vcluster.policy == 'pow_of_k_partitioned'): # Random and JIQ do not use this part
+        num_msg_tor[tor_id] += 1 # Update worker queuelen at ToR
+        if vcluster.policy == 'pow_of_k':
+            # Update ToR queue len at all of the spines
+            for spine_id in vcluster.selected_spine_list:
+                num_msg_spine[spine_id] += 1 
+        else: # Only update the designated spine
+            mapped_spine_idx = vcluster.tor_spine_map[tor_idx]
+            mapped_spine_id = vcluster.selected_spine_list[mapped_spine_idx]
+            num_msg_spine[mapped_spine_id] += 1
+    
+    else: #JIQ and adaptive
+        if vcluster.policy == 'jiq': # JIQ
+            if vcluster.queue_lens_workers[i] == 0: # Process for when a server becomes idle 
+                vcluster, num_msg_tor, num_msg_spine = jiq_server_process(
+                    vcluster, 
+                    num_msg_tor,
+                    num_msg_spine,
+                    k,
+                    i,
+                    tor_idx)
+        elif vcluster.policy == 'adaptive': # Adaptive
+            if vcluster.queue_lens_workers[i] == 0: # Process for when a server becomes idle 
+                vcluster, num_msg_tor, num_msg_spine = adaptive_server_process(
+                    vcluster,
+                    num_msg_tor,
+                    num_msg_spine,
+                    k,
+                    i,
+                    tor_idx)
+            else:
+                num_msg_tor[tor_id] += 1 
+                for spine_idx in range(vcluster.num_spines): # ToR that is paired with a spine, will update the signal 
+                    if tor_idx in vcluster.known_queue_len_spine[spine_idx]:
+                        # TODO @parham: Here the ToR should report the *known* queue lens or ToR keeps all of the queue lens
+                        vcluster.known_queue_len_spine[spine_idx].update({tor_idx: vcluster.queue_lens_tors[tor_idx]}) # Update SQ signals
+                        spine_id = vcluster.selected_spine_list[spine_idx]
+                        num_msg_spine[spine_id] += 1
 
     return num_msg_tor, num_msg_spine
 
@@ -374,6 +361,11 @@ def schedule_task_adaptive(new_task, k, num_msg_tor, num_msg_spine, target_spine
     if len(new_task.vcluster.idle_queue_spine[target_spine]) > 0:  # Spine is aware of some tors with idle servers
         target_tor = new_task.vcluster.idle_queue_spine[target_spine][0]
         new_task.decision_tag = 0
+        # if (new_task.vcluster.cluster_id == 5):
+        #     print(new_task.vcluster.idle_queue_spine)
+        #     print(new_task.vcluster.known_queue_len_spine)
+        #     print(new_task.vcluster.idle_queue_spine)
+            
     else:   # No tor with idle server is known
         sq_update = False
         if (len(new_task.vcluster.known_queue_len_spine[target_spine]) < partition_size_spine): # Scheduer still trying to get more queue len info
@@ -456,15 +448,30 @@ def update_switch_views(scheduled_task, num_msg_spine):
             if scheduled_task.target_tor in scheduled_task.vcluster.known_queue_len_spine[spine_idx]:
                 scheduled_task.vcluster.known_queue_len_spine[spine_idx].update({scheduled_task.target_tor: scheduled_task.vcluster.queue_lens_tors[scheduled_task.target_tor]}) # Update SQ signals
                 spine_id = scheduled_task.vcluster.selected_spine_list[spine_idx]
-                num_msg_spine[spine_id] += 1
         scheduled_task.vcluster.log_known_queue_len_spine.append(scheduled_task.vcluster.queue_lens_tors[scheduled_task.target_tor])
         
     return num_msg_spine
 
-def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_ratio, run_id, failure_mode, is_colocate):
+def handle_task_delivered(event):
+    delivered_task = event.task
+    task_waiting_time = np.sum(delivered_task.vcluster.task_lists[delivered_task.target_worker])
+    delivered_task.vcluster.log_task_wait_time.append(task_waiting_time) # Task assigned to target worker should wait at least as long as pending load
+    delivered_task.vcluster.log_task_transfer_time.append(delivered_task.transfer_time)
+    delivered_task.vcluster.log_queue_len_signal_workers.append(delivered_task.vcluster.queue_lens_workers[delivered_task.target_worker])
+    delivered_task.vcluster.log_queue_len_signal_tors.append(delivered_task.vcluster.queue_lens_tors[delivered_task.target_tor])
+    delivered_task.vcluster.log_decision_type.append(delivered_task.decision_tag)
+    
+    delivered_task.vcluster.task_lists[delivered_task.target_worker].append(delivered_task.load)
+    
+    return task_waiting_time
+
+def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_ratio, run_id, failure_mode, is_colocate, failed_switch_id):
     nr.seed()
     random.seed()
-    start_time = time.time()
+    #heapify(event_queue)
+    latency_model = LatencyModel('./')
+    spine_selector = SpineSelector(PER_SPINE_CAPACITY)
+    controller_pod = random.choice(range(num_pods))
 
     policy_file_tag = get_policy_file_tag(policy, k)
     
@@ -485,20 +492,10 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
     num_total_workers = data['tenants']['worker_count']
 
     tenants_maps = tenants['maps']
+    num_tenants = len(tenants_maps)
+    
     worker_start_idx = 0 # Used for mapping local worker_id to global_worker_id
-    
-    if task_distribution_name == "bimodal":
-            mean_task_time = (mean_task_small + mean_task_medium) / 2
-    elif task_distribution_name == "trimodal":
-        mean_task_time = (mean_task_small + mean_task_medium + mean_task_large) / 3
-    elif task_distribution_name == "exponential":
-        mean_task_time = mean_exp_task
-    
-    FWD_TIME_TICKS = ((mean_task_time / num_total_workers) / sys_load) / 2 # double the maximum frequency to capture all events
-    
 
-    latency_model = LatencyModel('./')
-    controller_pod = random.choice(range(num_pods))
     for t in range(len(tenants_maps)):
         host_list = tenants_maps[t]['worker_to_host_map']
         cluster_id = tenants_maps[t]['app_id']
@@ -508,20 +505,52 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
             policy,
             host_list,
             sys_load,
+            spine_selector,
             target_partition_size=spine_ratio,
             task_distribution_name=task_distribution_name)
+        
+        # For failure simulations we only process events of the impacted clusters (instead of all vclusters)
+        if failure_mode == 'none':
+            seq = next(counter)
+            event_entry = [0, seq, Event(event_type='new_task', vcluster=vcluster)]
+            heappush(event_queue, event_entry)
+
         for i, client_pod in enumerate(vcluster.client_pods):
             controller_latency = latency_model.get_notification_to_client_latency(controller_pod, client_pod)
             vcluster.set_client_controller_latency(i, controller_latency)
+
         vcluster_list.append(vcluster)
         worker_start_idx += tenants_maps[t]['worker_count']
     
-    
+    failure_happened = False
+    failure_detected = False
+    num_msg_to_client = 0
+    num_msg_to_leaf_controller = 0
+    num_converged_vclusters = 0
+    affected_tor_list = []
+    affected_vcluster_list = []  
     
     if (failure_mode == 'spine'):
-        failed_spine_id = random.choice(vcluster_list[0].selected_spine_list)
+        failed_spine_id = failed_switch_id
+        # If the failed spine was not used by any of the vclusters, terminate otherwise add events for the (to-be) impacted vclusters and process them
+        for vcluster in vcluster_list:
+            print (vcluster.selected_spine_list)
+            if failed_spine_id in vcluster.selected_spine_list:
+                print(vcluster.inter_arrival)
+                affected_vcluster_list.append(vcluster)
+                seq = next(counter)
+                event_entry = [0, seq, Event(event_type='new_task', vcluster=vcluster)]
+                heappush(event_queue, event_entry)
+                
+        if len(affected_vcluster_list)==0:
+            print ("Failure had no impact terminating experiment")
+            exit(1) 
+        seq = next(counter)
+        event_entry = [FAILURE_TIME_TICK, seq, Event(event_type='switch_failure', component_id=failed_spine_id)]
+        heappush(event_queue, event_entry)
+        
     elif (failure_mode == 'leaf'):
-        failed_leaf_id = random.choice(vcluster_list[0].tor_id_unique_list)
+        failed_leaf_id = failed_switch_id
 
     in_transit_tasks = []
 
@@ -537,212 +566,214 @@ def run_scheduling(policy, data, k, task_distribution_name, sys_load, spine_rati
     switch_state_spine = [] * num_spines 
     switch_state_tor = [] * num_tors
 
-    failure_happened = False
-    failure_detected = False
-    num_failed_tasks = 0
-    num_scheduled_tasks = 0
-
     terminate_experiment = False
     for spine_idx in range(num_spines):
-        # idle_queue_spine.append(get_tor_partition_range_for_spine(spine_idx))
-        # known_queue_len_spine.append({})
         switch_state_spine.append([0])
 
     for tor_idx in range(num_tors):
-        # idle_queue_tor.append(get_worker_range_for_tor(tor_idx))
-        # known_queue_len_tor.append({})
         switch_state_tor.append([0])
 
-    #last_task_arrival = 0.0
-    #task_idx = 0
+    start_time = time.time()
+
     tick = 0
-    failure_detection_tick = latency_model.failure_detection_latency + FAILURE_TIME_TICK
+    
+    event_count = 0
+    max_event_tick = 0
+    # for t, seq, e in event_queue:
+    #     print (seq)
+    #     print (e.vcluster)
+    #     e.print_debug()
+    failure_detection_time = 0
+
     while(cluster_terminate_count < len(vcluster_list)):
-        for vcluster in vcluster_list:  
+        event_tick, count, event = heappop(event_queue)
+        event_count += 1
+        # print ('\n\n\n\n')
+        # event.print_debug()
+        # print ('\n\n\n\n')
+
+        # for t, s, e in event_queue:
+        #     print (s)
+        #     print (e.vcluster)
+        #     e.print_debug()
+        #print("Got event for vcluster: " + str(event.print_debug()) + " Type: " + str(event.type) + " Time tick: " + str(event_tick))
+        
+        if event_tick >= max_event_tick:
+            max_event_tick = event_tick
+        else:
+            raise Exception("Got event in past!")
+        
+        tick = event_tick
+        if event.type == 'new_task':
+            vcluster = event.vcluster
+            vcluster.last_task_arrival = event_tick
+            num_idles = calculate_idle_count(vcluster.queue_lens_workers)
+            vcluster.idle_counts.append(num_idles)
+            load = vcluster.task_distribution[vcluster.task_idx] # Pick new task load (load is execution time)
+            new_task = Task(load, vcluster)
+            scheduling_failed = False
+            # A random client will initiate the request
+            client_index = random.randrange(vcluster.num_clients)
+            # Simulating arrival of task at a spine randomly
+            spine_sched_id = random.choice(vcluster.client_spine_list[client_index])
+            spine_shched_index = vcluster.selected_spine_list.index(spine_sched_id)
+            
+            if failure_happened:
+                if spine_sched_id == failed_spine_id: # Task was sent to the failed scheduler
+                    vcluster.num_failed_tasks += 1
+                    scheduling_failed = True
+                else:
+                    if not vcluster.failover_converged:
+                        vcluster.num_scheduled_tasks += 1
+            if not scheduling_failed:
+                if vcluster.policy == 'random':
+                    scheduled_task = schedule_task_random(new_task, spine_shched_index)
+
+                elif vcluster.policy == 'pow_of_k':
+                    scheduled_task = schedule_task_pow_of_k(new_task, k, spine_shched_index)
+                    
+                elif vcluster.policy == 'pow_of_k_partitioned':
+                    scheduled_task = schedule_task_pow_of_k_partitioned(new_task, k, spine_shched_index)
+
+                elif vcluster.policy == 'jiq':
+                    scheduled_task, num_msg_tor, num_msg_spine = schedule_task_jiq(
+                        new_task,
+                        num_msg_tor, 
+                        num_msg_spine, 
+                        spine_shched_index)
+
+                elif vcluster.policy == 'adaptive':
+                    scheduled_task, num_msg_tor, num_msg_spine = schedule_task_adaptive(
+                        new_task,
+                        k,
+                        num_msg_tor, 
+                        num_msg_spine, 
+                        spine_shched_index)
+
+                num_task_spine[scheduled_task.global_spine_id] += 1
+                num_task_tor[scheduled_task.global_tor_id] += 1
+                num_msg_spine = update_switch_views(scheduled_task, num_msg_spine)
+            
+                # Trigger two future events (1) task delivered to worker (2) next task arrive at scheduler
+                seq = next(counter)
+                event_entry = [tick + scheduled_task.network_time, seq, Event(event_type='delivered', vcluster=vcluster, task=scheduled_task)]
+                heappush(event_queue, event_entry)
+            if vcluster.task_idx < (len(vcluster.task_distribution) - 1):
+                seq = next(counter)
+                event_entry = [tick + vcluster.inter_arrival, seq, Event(event_type='new_task', vcluster=vcluster)]
+                heappush(event_queue, event_entry)
+                vcluster.task_idx += 1
+            else:
+                cluster_terminate_count += 1
+                report_cluster_results(log_handler_experiment, policy_file_tag, sys_load, vcluster, run_id, is_colocate)
+                # Report these metrics for the period that all vclusters are running
+                if (cluster_terminate_count==1):
+                    write_to_file(result_dir, 'task_per_sec_tor', policy_file_tag, sys_load, task_distribution_name, task_per_sec_tor, run_id, is_colocate=is_colocate)
+                    write_to_file(result_dir, 'task_per_sec_spine', policy_file_tag, sys_load, task_distribution_name, task_per_sec_spine, run_id, is_colocate=is_colocate)
+                    if policy != 'random':
+                        write_to_file(result_dir, 'msg_per_sec_tor', policy_file_tag, sys_load, task_distribution_name, msg_per_sec_tor, run_id, is_colocate=is_colocate)
+                        write_to_file(result_dir, 'msg_per_sec_spine', policy_file_tag, sys_load, task_distribution_name, msg_per_sec_spine, run_id, is_colocate=is_colocate)
+
+        elif event.type == 'finished':
             num_msg_tor, num_msg_spine = process_tasks_fcfs(
-                    vcluster=vcluster,
-                    ticks_passed=FWD_TIME_TICKS,
+                    finished_task=event.task,
                     num_msg_tor=num_msg_tor,
                     num_msg_spine=num_msg_spine,
                     k=k)
 
-        in_transit_tasks, arrived_tasks = process_network(in_transit_tasks, ticks_passed=FWD_TIME_TICKS)
+        elif event.type == 'delivered':
+            task_waiting_time = handle_task_delivered(event)
+            task_finish_time = tick + task_waiting_time + event.task.load
+            #print ("Registered: finish_time: " + str(task_finish_time) + " waiting_time: " + str(task_waiting_time) + " load: " + str(delivered_task.load))
+            seq = next(counter)
+            event_entry = [task_finish_time, seq, Event(event_type='finished', vcluster=event.task.vcluster, task=event.task)]
+            heappush(event_queue, event_entry)
 
-        for arrived_task in arrived_tasks:
             #print arrived_task.target_worker
             # if np.sum(arrived_task.vcluster.task_lists[arrived_task.target_worker]) > 0 and arrived_task.decision_tag == 0:
             #     print("ERROR! Spine :" + str(arrived_task.first_spine) + ", Tor :" + str(arrived_task.target_tor) + ", Worker :" + str(arrived_task.target_worker))
             #     exit(0)
-            arrived_task.vcluster.log_task_wait_time.append(np.sum(arrived_task.vcluster.task_lists[arrived_task.target_worker])) # Task assigned to target worker should wait at least as long as pending load
-            arrived_task.vcluster.log_task_transfer_time.append(arrived_task.transfer_time)
-            arrived_task.vcluster.log_queue_len_signal_workers.append(arrived_task.vcluster.queue_lens_workers[arrived_task.target_worker])
-            arrived_task.vcluster.log_queue_len_signal_tors.append(arrived_task.vcluster.queue_lens_tors[arrived_task.target_tor])
-            arrived_task.vcluster.log_decision_type.append(arrived_task.decision_tag)
-            arrived_task.vcluster.task_lists[arrived_task.target_worker].append(arrived_task.load)
-
-        if (failure_mode != 'none'):
-            if (tick >= FAILURE_TIME_TICK):
+        
+        elif event.type == 'switch_failure':
+            if (failure_mode == 'spine'):
                 failure_happened = True
-                if (tick >= failure_detection_tick):
-                    failure_detected = True
-        
-        # A service/cluster might have different number of workers, so its Max Load will be different than others.
-        # Process each service independently based on its load:
-        for vcluster in vcluster_list:
-            if (failure_detected):
-                for client_index, client_latency in enumerate(vcluster.client_controller_latency):
-                    if not vcluster.client_notified[client_index]:
-                        if (tick >= (client_latency + failure_detection_tick)):
-                            # print("client: " +str(client_index))
-                            # print(failed_spine_id)
-                            # print(vcluster.client_spine_list[client_index])
-                            # print(vcluster.selected_spine_list)
-                            vcluster.client_spine_list[client_index].remove(failed_spine_id)
-                            vcluster.client_notified[client_index] = True
-                
-                if (tick >= failure_detection_tick + vcluster.max_controller_latency):
-                    vcluster.failover_converged = True
-                    vcluster.failover_converge_latency = (tick - FAILURE_TIME_TICK) / TICKS_PER_MICRO_SEC
-                    terminate_experiment = True
+                seq = next(counter)
+                event_entry = [tick + latency_model.failure_detection_latency, seq, Event(event_type='spine_failure_detected', component_id=event.component_id)]
+                heappush(event_queue, event_entry)
+            print("Got failure event for spine: " + str(event.component_id) + " Time tick: " + str(event_tick))
 
-            if (tick - vcluster.last_task_arrival) > vcluster.inter_arrival and vcluster.task_idx < len(vcluster.task_distribution): # New task arrives
-                vcluster.last_task_arrival = tick
+        elif event.type == 'spine_failure_detected':
+            print("Got failure detected event spine: " + str(event.component_id) + " Time tick: " + str(event_tick))
+            failure_detection_time = tick
+            for vcluster in affected_vcluster_list:
+                print("Affected vcluster: " + str(vcluster.cluster_id))
+                num_msg_to_client += vcluster.num_clients
+                affected_tor_list.extend(vcluster.tor_id_unique_list)
+                for client_index, client_controller_latency in enumerate(vcluster.client_controller_latency):
+                    seq = next(counter)
+                    event_entry = [tick + client_controller_latency, seq, Event(event_type='failure_notice_client', vcluster=vcluster, component_id=event.component_id, client_id=client_index)]
+                    heappush(event_queue, event_entry)
+                affected_tor_list = list(set(affected_tor_list))
+                seq = next(counter)
+                event_entry = [tick + vcluster.max_controller_latency, seq, Event(event_type='vcluster_failover_converged', vcluster=vcluster)]
+                heappush(event_queue, event_entry)
+    
+        elif event.type == 'failure_notice_client':
+            print("Got failure notice for client: " + str(event.client_id) + " for vcluster: " + str(event.vcluster.cluster_id) + " Time tick: " + str(event_tick))
+            event.vcluster.client_spine_list[event.client_id].remove(event.component_id)
 
-                num_idles = calculate_idle_count(vcluster.queue_lens_workers)
-                vcluster.idle_counts.append(num_idles)
-                
-                load = vcluster.task_distribution[vcluster.task_idx] # Pick new task load (load is execution time)
-                new_task = Task(load, vcluster)
-                scheduling_failed = False
-
-                # A random client will initiate the request
-                client_index = random.randrange(vcluster.num_clients)
-                
-                # Simulating arrival of task at a spine randomly
-                spine_sched_id = random.choice(vcluster.client_spine_list[client_index])
-                spine_shched_index = vcluster.selected_spine_list.index(spine_sched_id)
-
-                if (failure_mode == 'spine'):
-                    if failure_happened:
-                        if spine_sched_id == failed_spine_id: # Task was sent to the failed scheduler
-                            vcluster.num_failed_tasks += 1
-                            scheduling_failed = True
-                        else:
-                            if not vcluster.failover_converged:
-                                vcluster.num_scheduled_tasks += 1
-
-                if not scheduling_failed:
-                    if policy == 'random':
-                        scheduled_task = schedule_task_random(new_task, spine_shched_index)
-
-                    elif policy == 'pow_of_k':
-                        scheduled_task = schedule_task_pow_of_k(new_task, k, spine_shched_index)
-                        
-                    elif policy == 'pow_of_k_partitioned':
-                        scheduled_task = schedule_task_pow_of_k_partitioned(new_task, k, spine_shched_index)
-
-                    elif policy == 'jiq':
-                        scheduled_task, num_msg_tor, num_msg_spine = schedule_task_jiq(
-                            new_task,
-                            num_msg_tor, 
-                            num_msg_spine, 
-                            spine_shched_index)
-
-                    elif policy == 'adaptive':
-                        scheduled_task, num_msg_tor, num_msg_spine = schedule_task_adaptive(
-                            new_task,
-                            k,
-                            num_msg_tor, 
-                            num_msg_spine, 
-                            spine_shched_index)
-                
-                    if (scheduled_task.global_spine_id >= len(num_task_spine)):
-                        print (len(num_task_spine))
-                        print (scheduled_task.global_spine_id)
-                        print(vcluster.cluster_id)
-                        exit(0)
-
-
-                    num_task_spine[scheduled_task.global_spine_id] += 1
-                    num_task_tor[scheduled_task.global_tor_id] += 1
-
-                    num_msg_spine = update_switch_views(scheduled_task, num_msg_spine)
-                    in_transit_tasks.append(scheduled_task)
-                    vcluster.task_idx += 1
-
-                if (vcluster.task_idx == len(vcluster.task_distribution) - 1):
-                    cluster_terminate_count += 1
-                    report_cluster_results(log_handler_experiment, policy_file_tag, sys_load, vcluster, run_id, is_colocate)                   
-        
-        tick += FWD_TIME_TICKS
- 
-        #  Take samples to capture fluctuations
-        if (tick%(int(mean_task_small/2)) == 0):
-            switch_state_tor, switch_state_spine = calculate_num_state(
-                            policy,
-                            switch_state_tor,
-                            switch_state_spine,
-                            vcluster,
-                            vcluster_list)
-
+        elif event.type == 'vcluster_failover_converged':
+            print("Failover converged for vcluster: " + str(event.vcluster.cluster_id) + " Time tick: " + str(event_tick))
+            event.vcluster.failover_converged = True
+            event.vcluster.failover_converge_latency = tick - failure_detection_time
+            num_converged_vclusters +=1
+            if num_converged_vclusters == len(affected_vcluster_list):
+                terminate_experiment = True
         elapsed_time = time.time() - start_time
         
         if elapsed_time > LOG_PROGRESS_INTERVAL:
-            log_handler_dcn.debug(policy_file_tag + ' progress log @' + str(sys_load) + ' Ticks passed: ' + str(tick) + ' Clusters done: ' + str(cluster_terminate_count))
-            exp_duration_s = float(tick) / (10**7)
-            max_state_spine = [max(x, default=0) for x in switch_state_spine]
-            max_state_tor = [max(x, default=0) for x in switch_state_tor]
+            log_handler_dcn.debug(policy_file_tag + ' progress log @' + str(sys_load) + ' Ticks passed: ' + str(tick) + ' Events processed: ' + str(event_count) + ' Clusters done: ' + str(cluster_terminate_count))
+            exp_duration_s = float(tick) / (10**9)
             msg_per_sec_spine = [x / exp_duration_s for x in num_msg_spine]
             msg_per_sec_tor = [x / exp_duration_s for x in num_msg_tor]
             task_per_sec_tor = [x / exp_duration_s for x in num_task_tor]
             task_per_sec_spine = [x / exp_duration_s for x in num_task_spine]
             
             if failure_mode == 'spine':
-                log_handler_dcn.info(policy_file_tag + ' num_failed_tasks @' + str(sys_load) + ' :' +  str(vcluster_list[0].num_failed_tasks))
-                log_handler_dcn.info(policy_file_tag + ' num_scheduled_tasks @' + str(sys_load) + ' :' +  str(vcluster_list[0].num_scheduled_tasks))
+                failed_tasks = [vcluster.num_failed_tasks for vcluster in affected_vcluster_list]
+                scheduled_tasks = [vcluster.num_scheduled_tasks for vcluster in affected_vcluster_list]
+                converge_latency = [vcluster.failover_converge_latency for vcluster in affected_vcluster_list]
+                affected_clients = [vcluster.num_clients for vcluster in affected_vcluster_list]
+                log_handler_dcn.info(policy_file_tag + ' num_failed_tasks @' + str(sys_load) + ' :' +  str(pd.Series(failed_tasks).describe()))
+                log_handler_dcn.info(policy_file_tag + ' num_scheduled_tasks @' + str(sys_load) + ' :' +  str(pd.Series(scheduled_tasks).describe()))
 
             log_handler_dcn.info(policy_file_tag + ' task_per_sec_spine @' + str(sys_load) + ':\n' +  str(pd.Series(task_per_sec_spine).describe()))
             log_handler_dcn.info(policy_file_tag + ' task_per_sec_tor @' + str(sys_load) + ':\n' +  str(pd.Series(task_per_sec_tor).describe()))
 
-            log_handler_dcn.info(policy_file_tag + ' switch_state_spine_max @' + str(sys_load) + ':\n' +  str(pd.Series(max_state_spine).describe()))
-            log_handler_dcn.info(policy_file_tag + ' switch_state_tor_max @' + str(sys_load) + ':\n' +  str(pd.Series(max_state_tor).describe()))
             log_handler_dcn.info(policy_file_tag + ' msg_per_sec_spine @' + str(sys_load) + ':\n' +  str(pd.Series(msg_per_sec_spine).describe()))
             log_handler_dcn.info(policy_file_tag + ' msg_per_sec_tor @' + str(sys_load) + ':\n' +  str(pd.Series(msg_per_sec_tor).describe()))    
             start_time = time.time()
-        
-        if terminate_experiment:
-            break
+            if terminate_experiment:
+                break
 
-    exp_duration_s = float(tick) / (10**7)
+    exp_duration_s = float(tick) / (10**9)
     msg_per_sec_spine = [x / exp_duration_s for x in num_msg_spine]
     msg_per_sec_tor = [x / exp_duration_s for x in num_msg_tor]
-    #print switch_state_spine
-    max_state_spine = [max(x, default=0) for x in switch_state_spine]
-    
-    mean_state_spine = [np.nanmean(x) for x in switch_state_spine if x]
-    max_state_tor = [max(x, default=0) for x in switch_state_tor]
-    mean_state_tor = [np.nanmean(x) for x in switch_state_tor if x]
     task_per_sec_tor = [x / exp_duration_s for x in num_task_tor]
     task_per_sec_spine = [x / exp_duration_s for x in num_task_spine]
-    
-    write_to_file(result_dir, 'task_per_sec_tor', policy_file_tag, sys_load, task_distribution_name, task_per_sec_tor, run_id, is_colocate=is_colocate)
-    write_to_file(result_dir, 'task_per_sec_spine', policy_file_tag, sys_load, task_distribution_name, task_per_sec_spine, run_id, is_colocate=is_colocate)
-    
+
     if failure_mode == 'spine':
-        failed_tasks = [vcluster.num_failed_tasks for vcluster in vcluster_list]
-        scheduled_tasks = [vcluster.num_scheduled_tasks for vcluster in vcluster_list]
-        converge_latency = [vcluster.failover_converge_latency for vcluster in vcluster_list]
+        failed_tasks = [vcluster.num_failed_tasks for vcluster in affected_vcluster_list]
+        scheduled_tasks = [vcluster.num_scheduled_tasks for vcluster in affected_vcluster_list]
+        converge_latency = [vcluster.failover_converge_latency for vcluster in affected_vcluster_list]
+        affected_clients = [vcluster.num_clients for vcluster in affected_vcluster_list]
+
         write_to_file(result_dir, 'num_failed_tasks', policy_file_tag, sys_load, task_distribution_name, failed_tasks, run_id, is_colocate=is_colocate)
         write_to_file(result_dir, 'num_scheduled_tasks', policy_file_tag, sys_load, task_distribution_name, scheduled_tasks, run_id, is_colocate=is_colocate)
         write_to_file(result_dir, 'converge_latency', policy_file_tag, sys_load, task_distribution_name, converge_latency, run_id, is_colocate=is_colocate)
-
-    if policy != 'random':
-        write_to_file(result_dir, 'switch_state_spine_mean', policy_file_tag, sys_load, task_distribution_name,  mean_state_spine, run_id, is_colocate=is_colocate)
-        write_to_file(result_dir, 'switch_state_tor_mean', policy_file_tag, sys_load, task_distribution_name,  mean_state_tor, run_id, is_colocate=is_colocate)
-        write_to_file(result_dir, 'switch_state_spine_max', policy_file_tag, sys_load, task_distribution_name,  max_state_spine, run_id, is_colocate=is_colocate)
-        write_to_file(result_dir, 'switch_state_tor_max', policy_file_tag, sys_load, task_distribution_name,  max_state_tor, run_id, is_colocate=is_colocate)
-        write_to_file(result_dir, 'msg_per_sec_tor', policy_file_tag, sys_load, task_distribution_name, msg_per_sec_tor, run_id, is_colocate=is_colocate)
-        write_to_file(result_dir, 'msg_per_sec_spine', policy_file_tag, sys_load, task_distribution_name, msg_per_sec_spine, run_id, is_colocate=is_colocate)
+        write_to_file(result_dir, 'affected_tors', policy_file_tag, sys_load, task_distribution_name, affected_tor_list, run_id, is_colocate=is_colocate)
+        write_to_file(result_dir, 'affected_clients', policy_file_tag, sys_load, task_distribution_name, affected_clients, run_id, is_colocate=is_colocate)
+    
 
 if __name__ == "__main__":
     arguments = docopt.docopt(__doc__, version='1.0')
@@ -756,8 +787,12 @@ if __name__ == "__main__":
     run_id = arguments['-i']
     task_distribution_name = arguments['-t']
     failure_mode = arguments['-f']
+    failed_switch_id = arguments.get('--fid', -1)
+    if failed_switch_id:
+        failed_switch_id = int(arguments.get('--fid', -1))
     is_colocate = arguments.get('--colocate', False)
-
+    print(policy)
+    
     data = read_dataset(working_dir, is_colocate)
-    run_scheduling(policy, data, k_value, task_distribution_name, load, spine_ratio, run_id, failure_mode, is_colocate)
+    run_scheduling(policy, data, k_value, task_distribution_name, load, spine_ratio, run_id, failure_mode, is_colocate, failed_switch_id)
 
