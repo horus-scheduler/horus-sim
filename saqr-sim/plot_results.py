@@ -655,12 +655,16 @@ def plot_latency_dimapct(policies, load, metric, distribution, cluster_size_rang
                 y_axis = [resp_ms * 1000 for resp_ms in sparrow_resp_time_p99]
                 y_err = [0] * len(loads)
                 break
-            if policy == 'racksched_iu': # Naming convention had k_X (Num samples befure the iu (Instant update tag))
+            if policy == 'random_racksched_k2_iu': # Naming convention had k_X (Num samples befure the iu (Instant update tag))
                 policy_d_file_name = 'racksched_k' + num_samples + '_iu'
-            elif policy == 'racksched_k1000000_iu':
-                policy_d_file_name = 'racksched_k1000000_iu'
+            elif policy == 'racksched_k10000_iu':
+                policy_d_file_name = 'racksched_k10000_iu'
+            elif policy == 'adaptive_k2':
+                policy_d_file_name = 'adaptive_k2'
+            
             else:
                 policy_d_file_name = policy + '_k' + num_samples
+            
             filename_wait_time = policy_d_file_name + '_' + distribution + output_tag + col_name_extension + 'wait_times_' + str(load) + '_r' + str(run_id) +'.csv'    
             filename_latency = policy_d_file_name + '_' + distribution + output_tag + col_name_extension + 'response_times_' + str(load) + '_r' + str(run_id) +'.csv'
         
@@ -1190,19 +1194,19 @@ if __name__ == "__main__":
     is_colocate = arguments.get('--colocate', False)
 
     if inc_racksched:
-        policies = ['adaptive_k' + str(k), 'racksched_k2', 'random_racksched_k2']
-        algorithm_names = ['Saqr', 'RS-H', 'RS-R']
+        policies = ['adaptive_k' + str(k), 'racksched_k1000000_iu', 'random_racksched_k2_iu']
+        algorithm_names = ['Saqr', 'Oracle', 'RS-R']
     else:
         policies = ['adaptive_k' + str(k), 'racksched_k2']
         algorithm_names = ['Saqr', 'RS-H']
 
-    if dissect:
-        policies = ['adaptive_k2', 'racksched_k2_iu', 'racksched_partitioned_k2', 'jiq_k2']
-        algorithm_names = ['Saqr', 'Pow-of-two Choices', 'Pow-of-two Choices (DU)', 'Idle Selection']
+    # if dissect:
+    #     policies = ['adaptive_k2', 'racksched_k2_iu', 'racksched_partitioned_k2', 'jiq_k2']
+    #     algorithm_names = ['Saqr', 'Pow-of-two Choices', 'Pow-of-two Choices (DU)', 'Idle Selection']
     
-    elif dimpact:
-        policies = ['adaptive', 'racksched_iu', 'racksched', 'racksched_k1000000_iu']
-        algorithm_names = ['Saqr', 'Pow-of-d', 'Pow-of-d (DU)', 'Oracle']
+    # elif dimpact:
+    #     policies = ['adaptive', 'racksched_iu', 'racksched', 'racksched_k1000000_iu']
+    #     algorithm_names = ['Saqr', 'Pow-of-d', 'Pow-of-d (DU)', 'Oracle']
         # policies = ['racksched_k2_iu', 'racksched_k4_iu', 'racksched_k8_iu', 'racksched_k16_iu']
         # algorithm_names = ['Pow-of-d (d=2)', 'Pow-of-d (d=4)', 'Pow-of-d (d=8)', 'Pow-of-d (d=16)']
         
@@ -1237,14 +1241,17 @@ if __name__ == "__main__":
     #plot_latency_vs_param_bar(policies, 'response_times', task_distribution, bucket_size=40, max_param=161, percentile=99, run_id=0, is_colocate=is_colocate, param='var')
     #plot_latency_vs_param_bar(policies, 'wait_times', task_distribution, bucket_size=5000, max_param=20001, percentile=99, run_id=0, is_colocate=is_colocate)
     
-    #plot_latency(policies, metric='response_times', distribution=task_distribution, percentile=0, cluster_size_range=range(10, 30000), is_colocate=is_colocate)
+    # average
+    plot_latency(policies, metric='response_times', distribution=task_distribution, percentile=0, cluster_size_range=range(10, 100), is_colocate=is_colocate)
+    # 99 percentile
+    plot_latency(policies, metric='response_times', distribution=task_distribution, percentile=99, cluster_size_range=range(10, 100), is_colocate=is_colocate)
     #plot_latency(policies, metric='response_times', distribution=task_distribution, percentile=99, cluster_size_range=range(10, 30000), is_colocate=is_colocate)
     #plot_latency(policies, metric='wait_times', distribution=task_distribution, percentile=99, cluster_size_range=range(10, 30000), is_colocate=is_colocate)
     #plot_latency(policies, metric='wait_times', distribution=task_distribution, percentile=0, cluster_size_range=range(10, 30000), is_colocate=is_colocate)
     #plot_latency(policies, metric='wait_times', distribution=task_distribution, percentile=50, cluster_size_range=range(10, 30000), is_colocate=is_colocate)
     #plot_latency(policies, metric='wait_times', distribution=task_distribution, percentile=90, cluster_size_range=range(10, 30000), is_colocate=is_colocate)
     
-    plot_latency_dimapct(policies, load=load, metric='response_times', distribution=task_distribution, percentile=99, cluster_size_range=range(0, 40000), is_colocate=is_colocate, name_tag= add_name_tag)    
+    # plot_latency_dimapct(policies, load=load, metric='response_times', distribution=task_distribution, percentile=99, cluster_size_range=range(0, 40000), is_colocate=is_colocate, name_tag= add_name_tag)    
 
     #plot_latency_cdf(policies, load=0.99, metric='wait_times', distribution=task_distribution, cluster_size_range=range(10, 30000), is_colocate=is_colocate, name_tag=add_name_tag)
     #plot_latency_cdf(policies, load=0.9, metric='wait_times', distribution=task_distribution, cluster_size_range=range(10, 30000), is_colocate=is_colocate, name_tag=add_name_tag)

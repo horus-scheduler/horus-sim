@@ -167,11 +167,6 @@ def get_policy_file_tag(policy, k):
     return policy_file_tag
 
 def write_to_file(working_dir, metric, policy, load, distribution, results, run_id, cluster_id=None, is_colocate=False):
-    if is_colocate:
-        sys_config_tag = 'col_' + 'n' + str(num_hosts) + '_t' + str(num_tenants)
-    else:
-        sys_config_tag = 'n' + str(num_hosts) + '_t' + str(num_tenants)
-
     if cluster_id != None:
         filename = policy + '_' + distribution + '_' + metric +  '_' + str(load) +  '_c' + str(cluster_id) + '_r' + run_id + '.csv'
     else:
