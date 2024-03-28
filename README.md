@@ -1,4 +1,3 @@
-
 ## In-Network Task Scheduler Simulator
 This repo contains the event-based simulator for in-network scheduling project **Horus: Distributed In-network Task Scheduler for Datacenters**.
 In addition to Horus the simulator supports multiple different policies (e.g Join-idle-queue and power-of-d choices). It is also used for comparison against the state-of-the-art in-network shceduler [RackSched](https://www.usenix.org/conference/osdi20/presentation/zhu) in large-scale datacenters.
@@ -48,7 +47,7 @@ To run the simulations, put the generated dataset and rtt_results.txt file in th
 ```
 python3 simulator.py 
 
--d <working_dir> -p <policy> -l <load> -k <k value> -r <spine ratio>  -t <task distribution> -i <experiment id> -f <failure mode> [--fid <failed switch id>] [--colocate] [--centralized] [--du] [--all]
+-d <working_dir> -p <policy> -l <load> -k <k value> -r <spine ratio>  -t <task distribution> -i <experiment id> [--delay <delay per link (micro sec)>] [--loss <loss probability per hop (fraction)>] -f <failure mode> [--fid <failed switch id>] [--colocate] [--centralized] [--du] [--all]
 
 ```
 
@@ -121,17 +120,17 @@ Below are some example cases for running the experiments that are included in th
 
 - Racksched-Random (RS-R), bimodal task distribution.
 ```
-python3 simulator.py -d $working_dir/ -p random_pow_of_k -l <load> -k 2 -r 40 -t bimodal -i 0 -f none --du
+python3 simulator.py -d $working_dir/ -p random_pow_of_k -l <load> -k 2 -r 40 -t bimodal -i 0 -f none --delay 5 --loss 0.00001 --du
 ```
 
 - Racksched-Hierarchical (RS-H), exponential task distribution.
 ```
-python3 simulator.py -d $working_dir/ -p pow_of_k -l <load> -k 2 -r 40 -t exponential -i 0 -f none --du
+python3 simulator.py -d $working_dir/ -p pow_of_k -l <load> -k 2 -r 40 -t exponential -i 0 -f none --delay 5 --loss 0.00001 --du
 ```
 
 - Horus, trimodal task distribution.
 ```
-python3 simulator.py -d $working_dir/ -p adaptive -l <load> -k 2 -r 40 -t trimodal -i 0 -f none 
+python3 simulator.py -d $working_dir/ -p adaptive -l <load> -k 2 -r 40 -t trimodal -i 0 -f --delay 5 --loss 0.00001 none 
 ```
 
 - Horus, failure simulations, r=40, bimodal task distribution, failing spine switch with  ID=100.
@@ -139,3 +138,4 @@ python3 simulator.py -d $working_dir/ -p adaptive -l <load> -k 2 -r 40 -t trimod
 python3 simulator.py -d $working_dir/l20/ -p adaptive -l load -k 2 -r 40 -t bimodal -i $run_id -f spine --fid 100
 ```
 > We run the same experiment for different *load* values [0.1, 0.99].
+> To analyze impact of loss or delay we vary the parameters and repeat each experiment
