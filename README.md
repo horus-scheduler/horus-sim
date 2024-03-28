@@ -1,7 +1,7 @@
 
 ## In-Network Task Scheduler Simulator
-This repo contains the event-based simulator for in-network scheduling project **Saqr: Distributed In-network Task Scheduler for Datacenters**.
-In addition to Saqr the simulator supports multiple different policies (e.g Join-idle-queue and power-of-d choices). It is also used for comparison against the state-of-the-art in-network shceduler [RackSched](https://www.usenix.org/conference/osdi20/presentation/zhu) in large-scale datacenters.
+This repo contains the event-based simulator for in-network scheduling project **Horus: Distributed In-network Task Scheduler for Datacenters**.
+In addition to Horus the simulator supports multiple different policies (e.g Join-idle-queue and power-of-d choices). It is also used for comparison against the state-of-the-art in-network shceduler [RackSched](https://www.usenix.org/conference/osdi20/presentation/zhu) in large-scale datacenters.
 ## Dependencies
 The ``requiremnts.txt`` file contains the essential libraries for running the code. The code is tested using Python 3.6.3.
 
@@ -59,8 +59,8 @@ The input can be one of the following:
 - **random_pow_of_k**: Simulates a system with rack-local schedulers where the tasks are sent to one of the racks randomly. Each rack-local scheduler will use pow-of-k policy to select a worker inside the rack.
 - **pow_of_k_partitioned**: Similar to pow_of_k, but in hierarchical schedulers, each spine scheduler tracks a subset of racks and when a task arrives each spine can send the task to its subset of racks (no replicated state).
 - **jiq**:  Simulates schedulers that use [Join-idle-queue (JIQ)](https://www.microsoft.com/en-us/research/publication/join-idle-queue-a-novel-load-balancing-algorithm-for-dynamically-scalable-web-services/) algorithm where they only track the idle nodes and use this info for scheduling tasks. At leaf layer, each scheduler tracks the idle workers in its own rack. At spine layer, leaf switches use the probing  mechanism (with two probes) as in the original paper to join the idle list of one of the spines. 
-- **adaptive**: This is **Saqr** policy. It uses the idle info and load info (power-of-two choices) adaptively to schedule tasks.
-> Note: "central_queue" can be also passed where it simulates a single scheduler switch handles the scheduling for each virtual cluster. It simulates the [Falcon](https://opennetworking.org/wp-content/uploads/2020/11/Falcon_Slides-Ibrahim-Kettaneh.pdf) Policy where tasks are queued in the switch until a worker is idle. In this simulation, the simulator also checks the memory slots available for queueing tasks (as mentioned in their paper). It did not scale for bimodal or exponential task distribution and queues becomes saturated after a certain time.
+- **adaptive**: This is **Horus** policy. It uses the idle info and load info (power-of-two choices) adaptively to schedule tasks.
+
 
 ### Load
 The input should in format 0.x where x<1. It indicates the load relative to the maximum capacity of the clusters. For each cluster this load translates to mean inter-arrival time for tasks (higher load means smaller inter-arrival delays). We ran experiments for 0.1, 0.2 ... 0.99 load values.
@@ -102,19 +102,19 @@ Optional input, used for simulating the *Oracle* scheduler where a single compon
 ### --du
 Delayed Updates: Optional input, it controls the process of updating switch states *after making a scheduling decisions*. 
 
-Schedulers in Racksched do not update the load state after they make a decision and the state is **only updated when a reply from the worker arrives at the switch**. To simulate such case, we pass ``--du`` to the simulator. For Saqr schedulers we do not use this option by default. It is also used in breaking down Saqr benefits to observe the impact of delayed updates.
+Schedulers in Racksched do not update the load state after they make a decision and the state is **only updated when a reply from the worker arrives at the switch**. To simulate such case, we pass ``--du`` to the simulator. For Horus schedulers we do not use this option by default. It is also used in breaking down Horus benefits to observe the impact of delayed updates.
 
-> Note: for pow_of_k policy and pow_of_k_partitioned, the default setting is to pass --du. The output files in the other case (run without --du option), the output files will conatin a "_iu_" in their name which indicates that (instant updates were enabled). For saqr policy, the default is instant updates so in case that run with --du option, saqr output files will contain a "_du_" to indicate that it is delayed updates.
+> Note: for pow_of_k policy and pow_of_k_partitioned, the default setting is to pass --du. The output files in the other case (run without --du option), the output files will conatin a "_iu_" in their name which indicates that (instant updates were enabled). For horus policy, the default is instant updates so in case that run with --du option, horus output files will contain a "_du_" to indicate that it is delayed updates.
 
 ### --all
-If passed, it forces simulator to save all output files. In normal case the output will contain *waiting_time* and *response_time* for every task and the message rate metrics for switches. If --all is passed, the output will also include the *transfer time* (time spend for task in network before arrives at worker), and *decision type* (for saqr) which indicates that each scheduling decision is made based on idle selection (0) or pow of two choices (1). 
+If passed, it forces simulator to save all output files. In normal case the output will contain *waiting_time* and *response_time* for every task and the message rate metrics for switches. If --all is passed, the output will also include the *transfer time* (time spend for task in network before arrives at worker), and *decision type* (for horus) which indicates that each scheduling decision is made based on idle selection (0) or pow of two choices (1). 
 > For final simulations we did not pass --all to reduce the space used for each experiment. The additional metrics were useful in intermediate stages when desiging the policy and state distribution.
 
  
 ## Example Usage 
 
 ### Result folder and datasets
-The ```result-dir``` folder provides an example of the experiment result directory. It also includes the **Datasets** used in our experiments and the RTT latency file. The experiments on analysis of Saqr (breaking down benefits and impact of d samples) are done on smaller dataset which is provided in this folder. To run experiments on the small data set, rename the file to ```summary_system.log``` and run the simulator. 
+The ```result-dir``` folder provides an example of the experiment result directory. It also includes the **Datasets** used in our experiments and the RTT latency file. The experiments on analysis of Horus (breaking down benefits and impact of d samples) are done on smaller dataset which is provided in this folder. To run experiments on the small data set, rename the file to ```summary_system.log``` and run the simulator. 
 
 ### Python Script 
 Below are some example cases for running the experiments that are included in the paper. 
@@ -129,12 +129,12 @@ python3 simulator.py -d $working_dir/ -p random_pow_of_k -l <load> -k 2 -r 40 -t
 python3 simulator.py -d $working_dir/ -p pow_of_k -l <load> -k 2 -r 40 -t exponential -i 0 -f none --du
 ```
 
-- Saqr, trimodal task distribution.
+- Horus, trimodal task distribution.
 ```
 python3 simulator.py -d $working_dir/ -p adaptive -l <load> -k 2 -r 40 -t trimodal -i 0 -f none 
 ```
 
-- Saqr, failure simulations, r=40, bimodal task distribution, failing spine switch with  ID=100.
+- Horus, failure simulations, r=40, bimodal task distribution, failing spine switch with  ID=100.
 ```
 python3 simulator.py -d $working_dir/l20/ -p adaptive -l load -k 2 -r 40 -t bimodal -i $run_id -f spine --fid 100
 ```

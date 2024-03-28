@@ -6,13 +6,16 @@ from utils import *
 WORKER_CLIENT_RATIO = 20
 
 class Event:
-    def __init__(self, event_type, vcluster=None, task=None, component_id=None, client_id=None):
+    def __init__(self, event_type, vcluster=None, task=None, src_id=None, qlen=None, component_id=None, client_id=None, delay=None):
         self.type = event_type # A string indicating type of event
         self.vcluster = vcluster # virtual cluster ID for the event
         self.task=task # If the event is about a task, it holds the task object here 
         self.component_id = component_id # ID of the target component that will process this event
         self.client_id = client_id # ID of the client that initially sent the task to system (used in scheduler failure simulations)
-    
+        self.delay = delay
+        self.src_id = src_id
+        self.qlen = qlen
+
     def print_debug(self):
         if (self.vcluster):
             return(self.vcluster.cluster_id)
@@ -32,7 +35,7 @@ class VirtualCluster:
         self.is_single_layer = is_single_layer
         self.policy = policy
         self.max_wait_time = 0
-
+        
         self.cluster_id = cluster_id
         self.spine_selector = spine_selector
 
@@ -49,9 +52,13 @@ class VirtualCluster:
         self.tor_id_unique_list = list(set(self.tor_id_list))
 
         self.num_tors = len(self.tor_id_unique_list)
+        print("num tors", self.num_tors)
         self.workers_per_tor = [0] * self.num_tors
+        self.num_reply_observed = [0] * self.num_tors
+        self.num_idle_task_observed = [0] * self.num_tors
         self._set_load(load)
         self._get_spine_list_for_tors(target_partition_size, policy)
+        print("num spines", len(self.selected_spine_list))
         self.num_spines = len(self.selected_spine_list)
         self.init_cluster_state()
         # for i, spine_id in enumerate(self.selected_spine_list):
@@ -84,13 +91,13 @@ class VirtualCluster:
         self.queue_lens_tors = [0.0] * self.num_tors
         self.last_task_arrival = 0.0
         self.task_idx = 0
-        
+        self.tasks_done = 0
         self.arrival_delay_exponential = random.expovariate(1.0 / self.inter_arrival)
 
         self.queue_lens_workers = [0] * self.num_workers
         self.task_lists = [] * self.num_workers
         self.curr_task_start_time = [0] * self.num_workers
-        self.idle_queue_tor = [] * self.num_tors
+        self.idle_queue_tor = [set([])] * self.num_tors
         self.idle_queue_spine = [] * self.num_spines
         self.tor_idle_link = [-1] * self.num_tors # This is a single value representing the Index of linked idle spine for each leaf (stored at leaf switch) 
 
@@ -100,6 +107,10 @@ class VirtualCluster:
         self.known_queue_len_spine = [] * self.num_spines  # For each spine, list of maps between torID and average queueLen if ToR
         self.load_track_leafs = [] * self.num_spines
         self.log_queue_len_signal_tors = []  # For analysis only 
+        self.log_load_imbalance_workers = []
+        self.log_load_imbalance_intra_rack_mean = []
+        self.log_load_imbalance_intra_rack_max = []
+        self.log_load_imbalance_tors = []
         self.log_queue_len_signal_workers = [] 
         self.log_task_wait_time = []
         self.log_response_time = []
@@ -122,9 +133,14 @@ class VirtualCluster:
             self.known_queue_len_spine.append({})
             self.load_track_leafs.append([])
 
-        for spine_idx in range(self.num_spines):
-            for tor_idx in self.spine_tor_map[spine_idx]:
-                self.known_queue_len_spine[spine_idx].update({tor_idx: 0}) # This is to indicate that spine will track queue len of ToR from now on    
+        if self.policy == 'pow_of_k':
+            for spine_idx in range(self.num_spines):
+                for tor_idx in range(len(self.tor_id_unique_list)):
+                    self.known_queue_len_spine[spine_idx].update({tor_idx: 0}) # This is to indicate that spine will track queue len of ToR from now on    
+        else:
+            for spine_idx in range(self.num_spines):
+                for tor_idx in self.spine_tor_map[spine_idx]:
+                    self.known_queue_len_spine[spine_idx].update({tor_idx: 0}) # This is to indicate that spine will track queue len of ToR from now on    
 
         #print (self.known_queue_len_spine)
         
@@ -137,10 +153,9 @@ class VirtualCluster:
                     self.idle_queue_spine[spine_idx].append(worker_idx)
         else:
             for tor_idx in range(self.num_tors):
-                self.idle_queue_tor.append([])
                 for worker_idx in range(self.num_workers):
                     if self.host_list[worker_idx] in get_host_range_for_tor(self.tor_id_unique_list[tor_idx]):
-                        self.idle_queue_tor[tor_idx].append(worker_idx)
+                        self.idle_queue_tor[tor_idx].add(worker_idx)
                 
             
             added_tor_idx = 0
