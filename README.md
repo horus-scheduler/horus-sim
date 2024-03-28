@@ -1,5 +1,5 @@
 ## In-Network Task Scheduler Simulator
-This repo contains the event-based simulator for in-network scheduling project **Horus: Distributed In-network Task Scheduler for Datacenters**.
+This repo contains the event-based simulator for in-network scheduling project [Horus: Granular In-Network Task Scheduler for Cloud Datacenters](https://www.usenix.org/conference/nsdi24/presentation/yassini).
 In addition to Horus the simulator supports multiple different policies (e.g Join-idle-queue and power-of-d choices). It is also used for comparison against the state-of-the-art in-network shceduler [RackSched](https://www.usenix.org/conference/osdi20/presentation/zhu) in large-scale datacenters.
 ## Dependencies
 The ``requiremnts.txt`` file contains the essential libraries for running the code. The code is tested using Python 3.6.3.
